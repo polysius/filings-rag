@@ -1,0 +1,10 @@
+# Pilot corpus: 12 companies across 4 sectors. Expand to 20-50 once the pipeline is stable.
+filings_per_company:
+  10-K: 2
+  10-Q: 3
+
+sectors:
+  technology: [AAPL, MSFT, NVDA]
+  banks: [JPM, BAC, GS]
+  healthcare: [JNJ, PFE, UNH]
+  energy: [XOM, CVX, COP]
