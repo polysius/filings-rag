@@ -1,4 +1,4 @@
-.PHONY: install test lint corpus
+.PHONY: install test lint corpus parse
 
 install:
 	pip install -e ".[dev]"
@@ -12,3 +12,6 @@ lint:
 # Requires SEC_USER_AGENT, e.g. "Your Name your.email@example.com"
 corpus:
 	filings-rag build-corpus --config configs/companies.yaml --out data
+
+parse:
+	filings-rag parse-corpus --data data
