@@ -259,3 +259,57 @@ def test_table_block_converts_to_dataframe():
     assert frame.iloc[1, 0] == "Net sales"
     assert frame.iloc[1, 1] == "$383,285"
     assert frame.iloc[2, 1] == "(4)%"
+
+
+def test_header_over_the_number_cell_and_plain_number_rows_share_columns():
+    html = (
+        "<table><tr><td></td><td></td><td>2023</td><td></td><td>2022</td></tr>"
+        "<tr><td>Net sales</td><td>$</td><td>383</td><td>$</td><td>394</td></tr>"
+        "<tr><td>Cost</td><td></td><td>200</td><td></td><td>210</td></tr></table>"
+    )
+
+    rows = parse_blocks(html)[0].rows
+
+    assert rows == [["", "2023", "2022"], ["Net sales", "$383", "$394"], ["Cost", "200", "210"]]
+
+
+def test_symbols_next_to_symbols_are_not_merged():
+    assert clean_table_rows([["Total", "$", "", "$", "5"]]) == [["Total", "$", "$5"]]
+
+
+def test_inline_tags_do_not_add_spaces_inside_words_or_numbers():
+    html = (
+        "<div><span>Net sales increased </span><span>8</span><span>% to $</span>"
+        "<span><ix:nonfraction>96.2</ix:nonfraction></span><span> billion.</span></div>"
+        "<p>The Company<span>’s</span> non-<i>GAAP</i> results</p>"
+    )
+
+    texts = [b.text for b in parse_blocks(html)]
+
+    assert texts == ["Net sales increased 8% to $96.2 billion.", "The Company’s non-GAAP results"]
+
+
+def test_spacer_rows_hidden_rows_and_nested_captions_do_not_hide_a_layout_table():
+    html = (
+        "<table><tr><td></td><td></td></tr>"
+        "<tr><td><b>Item 7.</b></td><td><b>Management's Discussion</b></td></tr>"
+        "<tr style='display:none'><td>SECRET</td><td>9</td></tr></table><p>Body.</p>"
+    )
+
+    blocks = parse_blocks(html)
+
+    assert (blocks[0].kind, blocks[0].text) == ("heading", "Item 7. Management's Discussion")
+    assert "SECRET" not in " ".join(b.text for b in blocks)
+
+
+def test_long_bold_item_heading_without_period_sets_the_section():
+    title = "Item 5 Market for Registrant's Common Equity, Related Stockholder Matters and Issuer Purchases"
+    blocks = parse_blocks(f"<p><b>{title}</b></p><p>Body.</p>")
+
+    assert (blocks[0].kind, blocks[1].section) == ("heading", title)
+
+
+def test_bold_roman_numeral_is_kept_but_lowercase_page_numeral_is_dropped():
+    blocks = parse_blocks("<p><b>PART</b></p><p><b>I</b></p><p>ii</p>")
+
+    assert [b.text for b in blocks] == ["PART", "I"]

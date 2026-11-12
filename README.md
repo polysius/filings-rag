@@ -55,5 +55,9 @@ Known limits:
   spans can still misalign, so check the extracted tables before trusting a column.
 - A nested table is flattened into the text of its parent cell. A table with one row is treated
   as page layout and read as text.
+- Page breaks inside a table are ignored, so a break between table rows does not start a new
+  page. A layout table with several rows is read as a data table.
+- A document nested about 500 levels deep fails with a recursion error and is listed as failed in
+  the report.
 - Bare page numbers and common footers are dropped. An unusual footer can remain as text.
 - Filings that are not HTML are not supported.

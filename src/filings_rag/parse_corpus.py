@@ -67,6 +67,12 @@ def parse_corpus(data_dir: Path) -> list[ParseResult]:
     parsed_dir = data_dir / "parsed"
     parsed_dir.mkdir(exist_ok=True)
 
+    # Drop output for filings that are no longer in the manifest.
+    expected = {f"{Path(entry['path']).stem}.json" for entry in manifest}
+    for stale in parsed_dir.glob("*.json"):
+        if stale.name not in expected:
+            stale.unlink()
+
     results = []
     for entry in manifest:
         raw_path = data_dir / entry["path"]

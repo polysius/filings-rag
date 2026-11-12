@@ -30,6 +30,7 @@ HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 MAX_HEADING_LENGTH = 100
 MAX_SECTION_HEADING_LENGTH = 120
 MAX_COLSPAN = 100
+SYMBOLS = {"$", ")", "%", ")%"}
 
 PAGE_BREAK_RE = re.compile(
     r"(page-break|break)-(?P<where>before|after)\s*:\s*(always|page)", re.IGNORECASE
@@ -49,7 +50,7 @@ LOOSE_SECTION_RE = re.compile(r"^(?:part\s+[ivx]+|items?\s+\d+[a-c]?)\b", re.IGN
 # Page furniture: "12", "F-12", "- 2 -", "ii" and "Company | 2023 Form 10-K | 17".
 PAGE_FURNITURE_RE = re.compile(
     r"^(?:[-–]\s*)?(?:[A-Z]-)?\d{1,3}(?:\s*[-–])?$"
-    r"|^[ivxl]{1,6}$"
+    r"|^(?-i:[ivxl]{1,6})$"
     r"|^.{0,60}\|.{0,40}form 10-[kq].{0,20}\|\s*\d{1,3}$",
     re.IGNORECASE,
 )
@@ -130,18 +131,37 @@ def clean_table_rows(grid: list[list[str]]) -> list[list[str]]:
     width = max(len(row) for row in rows)
     rows = [row + [""] * (width - len(row)) for row in rows]
     used_columns = [i for i in range(width) if any(row[i] for row in rows)]
-    return [[row[i] for i in used_columns] for row in rows]
+    return _merge_compatible_columns([[row[i] for i in used_columns] for row in rows])
+
+
+def _merge_compatible_columns(rows: list[list[str]]) -> list[list[str]]:
+    """Join neighbouring columns that are never filled in the same row.
+
+    A year header often sits one column away from its values because of "$" spacer cells, so
+    the header and the values end up in two columns that together make one. The first column
+    holds the row labels and is never merged.
+    """
+    columns = [list(column) for column in zip(*rows)]
+    merged = [columns[0]]
+    for column in columns[1:]:
+        previous = merged[-1]
+        never_both_filled = not any(a and b for a, b in zip(previous, column))
+        if len(merged) > 1 and never_both_filled:
+            merged[-1] = [a or b for a, b in zip(previous, column)]
+        else:
+            merged.append(column)
+    return [list(row) for row in zip(*merged)]
 
 
 def _merge_symbol_cells(cells: list[str]) -> list[str]:
     for i, cell in enumerate(cells):
         if cell == "$":
             following = next((j for j in range(i + 1, len(cells)) if cells[j]), None)
-            if following is not None:
+            if following is not None and cells[following] not in SYMBOLS:
                 cells[i], cells[following] = "$" + cells[following], ""
         elif cell in {")", "%", ")%"}:
             preceding = next((j for j in range(i - 1, -1, -1) if cells[j]), None)
-            if preceding is not None:
+            if preceding is not None and cells[preceding] != "$":
                 cells[preceding] += cell
                 cells[i] = ""
     return cells
@@ -259,8 +279,8 @@ class _Walker:
             self._visit(child)
         else:
             is_bold = self._bold_depth > 0 or _is_bold(child)
-            self._pending.append((" ", is_bold))
-            self._pending += _inline_parts(child, is_bold)
+            separator = [(" ", is_bold)] if child.name in SPACING_TAGS else []
+            self._pending += separator + _inline_parts(child, is_bold) + separator
 
     def _start_new_page(self) -> None:
         # The page number only advances when content arrives, so a break at the end of the
@@ -296,15 +316,22 @@ class _Walker:
     def _is_heading(text: str, all_bold: bool) -> bool:
         if SECTION_HEADING_RE.match(text) and len(text) <= MAX_SECTION_HEADING_LENGTH:
             return True
-        return all_bold and len(text) <= MAX_HEADING_LENGTH
+        limit = MAX_SECTION_HEADING_LENGTH if LOOSE_SECTION_RE.match(text) else MAX_HEADING_LENGTH
+        return all_bold and len(text) <= limit
 
     def _emit_table(self, table: Tag) -> None:
-        caption = table.find("caption")
+        caption = next(
+            (c for c in table.find_all("caption") if c.find_parent("table") is table), None
+        )
         if caption is not None:
             self._pending += _inline_parts(caption, self._bold_depth > 0)
             self._flush()
 
-        rows = [row for row in table.find_all("tr") if row.find_parent("table") is table]
+        rows = [
+            row
+            for row in table.find_all("tr")
+            if row.find_parent("table") is table and not _is_hidden(row) and _flat_text(row)
+        ]
         if len(rows) == 1:
             self._emit_single_row_table(rows[0])
         elif rows:
