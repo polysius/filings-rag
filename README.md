@@ -10,7 +10,7 @@ financial fields, and validates them against XBRL ground truth. Answers cite doc
 |-----------|-------|
 | M1 Corpus (EDGAR download, XBRL facts, manifest) | Implemented |
 | M2 Parsing (headings, text, tables, page numbers, report) | Implemented, not yet run on real filings |
-| M3 Structured extraction | Planned |
+| M3 Structured extraction (Claude, schema validation, XBRL scoring) | Implemented, not yet run on real filings |
 | M4 Retrieval and QA | Planned |
 | M5 API | Planned |
 
@@ -61,3 +61,25 @@ Known limits:
   the report.
 - Bare page numbers and common footers are dropped. An unusual footer can remain as text.
 - Filings that are not HTML are not supported.
+
+## Extraction
+
+`make extract` needs `ANTHROPIC_API_KEY`. For each parsed filing it sends the tables that mention
+revenue, net income, total assets or segments, plus the start of Item 1A, to Claude. Every excerpt
+is tagged `[page N]`. The reply must be JSON that passes the `FilingExtraction` schema in
+`src/filings_rag/schema.py`: revenue, net income, total assets, segments and up to five risk
+factor titles, with a page for each amount. An invalid reply is sent back with the validation
+error, up to three attempts. Results are saved in `data/extracted/` and a rerun skips them.
+
+Revenue, net income and total assets are then compared with XBRL company facts and the accuracy
+per field is written to `data/RESULTS.md`. The lookup tries several revenue concepts, because
+companies tag revenue differently, and matches 10-Q flow values on period length so the quarter
+is not confused with the year to date. Segments and risk factors have no XBRL value and are not
+scored.
+
+Known limits:
+
+- Only the first 6,000 characters of Item 1A are sent, so the risk factors reflect the start of
+  the section rather than a ranking of the whole section.
+- Context is picked by keyword. A statement table that never uses these words is not sent.
+- Banks tag revenue in several ways, so a bank can show as missing when no tried concept exists.
