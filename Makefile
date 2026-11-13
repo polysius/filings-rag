@@ -1,4 +1,4 @@
-.PHONY: install test lint corpus parse extract
+.PHONY: install test lint corpus parse extract eval-retrieval
 
 install:
 	pip install -e ".[dev]"
@@ -19,3 +19,7 @@ parse:
 # Requires Claude API credentials, e.g. ANTHROPIC_API_KEY
 extract:
 	filings-rag extract --data data
+
+# Needs data/questions.jsonl, see the README
+eval-retrieval:
+	filings-rag eval-retrieval --data data
