@@ -21,9 +21,7 @@ class FakeEdgarClient:
         return b'{"facts": {}}'
 
     def list_filings(self, cik, form, limit):
-        return [
-            FilingRef(cik, "0000320193-23-000106", form, "2023-09-30", "2023-11-03", "k23.htm")
-        ]
+        return [FilingRef(cik, "0000320193-23-000106", form, "2023-09-30", "2023-11-03", "k23.htm")]
 
     def download_filing(self, filing):
         self.downloads += 1

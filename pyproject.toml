@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Document intelligence and citation-grounded RAG over SEC 10-K and 10-Q filings"
 requires-python = ">=3.10"
 dependencies = [
+    "beautifulsoup4>=4.12",
     "httpx>=0.27",
+    "lxml>=5.0",
+    "pandas>=2.0",
     "pyyaml>=6.0",
 ]
 
