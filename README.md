@@ -64,7 +64,9 @@ Known limits:
 
 ## Extraction
 
-`make extract` needs `ANTHROPIC_API_KEY`. For each parsed filing it sends the tables that mention
+`make extract` needs Claude API credentials (`ANTHROPIC_API_KEY`, or a profile from
+`ant auth login`) and calls `claude-opus-5-5`, with the server-side refusal fallback turned on.
+Set `MODEL` in `src/filings_rag/extractor.py` to use a cheaper model. For each parsed filing it sends the tables that mention
 revenue, net income, total assets or segments, plus the start of Item 1A, to Claude. Every excerpt
 is tagged `[page N]`. The reply must be JSON that passes the `FilingExtraction` schema in
 `src/filings_rag/schema.py`: revenue, net income, total assets, segments and up to five risk

@@ -1,14 +1,15 @@
 """Extract structured fields from filing text with an LLM, validating and retrying."""
 
 import json
-import os
 from typing import Protocol
 
 from pydantic import ValidationError
 
 from filings_rag.schema import FilingExtraction
 
-MODEL = "claude-sonnet-5-5"  # bulk extraction, so the cheaper current Sonnet
+MODEL = "claude-opus-5-5"
+# Thinking tokens count against the limit, so leave room for them and for the JSON answer.
+MAX_TOKENS = 16_000
 MAX_ATTEMPTS = 3
 
 SYSTEM_PROMPT = """You extract key fields from SEC 10-K and 10-Q filings.
@@ -29,26 +30,34 @@ class Completer(Protocol):
     def complete(self, system: str, user: str) -> str: ...
 
 
+class CompletionError(Exception):
+    """The model stopped without a complete answer, so retrying with feedback would not help."""
+
+
 class AnthropicCompleter:
     def __init__(self, model: str = MODEL):
         import anthropic  # imported here so the rest of the package works without the SDK
 
+        # The client finds credentials itself: an API key, an auth token or a logged-in profile.
         self._client = anthropic.Anthropic()
         self._model = model
 
     def complete(self, system: str, user: str) -> str:
-        response = self._client.messages.create(
+        response = self._client.beta.messages.create(
             model=self._model,
-            max_tokens=4000,
+            max_tokens=MAX_TOKENS,
             system=system,
             messages=[{"role": "user", "content": user}],
+            # If a safety classifier declines the request, the API reruns it on a fallback model.
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
         )
+        if response.stop_reason in ("refusal", "max_tokens"):
+            raise CompletionError(f"Model stopped early: {response.stop_reason}")
         return "".join(block.text for block in response.content if block.type == "text")
 
 
 def completer_from_env() -> AnthropicCompleter:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise RuntimeError("Set ANTHROPIC_API_KEY to run extraction.")
     return AnthropicCompleter()
 
 

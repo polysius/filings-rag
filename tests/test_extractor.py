@@ -1,7 +1,15 @@
+import inspect
+from types import SimpleNamespace
+
 import pytest
 
 from filings_rag.context import MAX_RISK_CHARACTERS, build_context
-from filings_rag.extractor import ExtractionError, extract_filing
+from filings_rag.extractor import (
+    AnthropicCompleter,
+    CompletionError,
+    ExtractionError,
+    extract_filing,
+)
 from filings_rag.parser import Block
 
 VALID_REPLY = '{"revenue": {"value": 1000000, "page": 3}, "top_risk_factors": ["Competition"]}'
@@ -111,3 +119,49 @@ def test_description_is_part_of_the_prompt():
     extract_filing(completer, "context", "Acme 10-Q ending 2024-09-30")
 
     assert "Acme 10-Q ending 2024-09-30" in completer.user_prompts[0]
+
+
+class FakeResponse:
+    def __init__(self, stop_reason: str, text: str = "{}"):
+        self.stop_reason = stop_reason
+        self.content = [SimpleNamespace(type="thinking"), SimpleNamespace(type="text", text=text)]
+
+
+def completer_with_response(monkeypatch, response):
+    """An AnthropicCompleter whose SDK client returns `response` and records the call."""
+    import anthropic
+
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return response
+
+    client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(create=create)))
+    monkeypatch.setattr(anthropic, "Anthropic", lambda: client)
+    return AnthropicCompleter(), calls
+
+
+def test_anthropic_completer_returns_only_the_text_blocks(monkeypatch):
+    completer, calls = completer_with_response(monkeypatch, FakeResponse("end_turn", "{}"))
+
+    assert completer.complete("system", "user") == "{}"
+    assert calls[0]["model"] == "claude-opus-5-5"
+
+
+def test_anthropic_completer_call_matches_the_sdk_signature(monkeypatch):
+    from anthropic.resources.beta.messages import Messages
+
+    completer, calls = completer_with_response(monkeypatch, FakeResponse("end_turn"))
+
+    completer.complete("system", "user")
+
+    inspect.signature(Messages.create).bind(None, **calls[0])  # raises TypeError on a bad keyword
+
+
+@pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
+def test_anthropic_completer_rejects_an_incomplete_answer(monkeypatch, stop_reason):
+    completer, _ = completer_with_response(monkeypatch, FakeResponse(stop_reason))
+
+    with pytest.raises(CompletionError):
+        completer.complete("system", "user")

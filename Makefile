@@ -16,6 +16,6 @@ corpus:
 parse:
 	filings-rag parse-corpus --data data
 
-# Requires ANTHROPIC_API_KEY
+# Requires Claude API credentials, e.g. ANTHROPIC_API_KEY
 extract:
 	filings-rag extract --data data
