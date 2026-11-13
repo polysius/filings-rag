@@ -25,7 +25,7 @@ MAX_CAPTION = 200
 
 def table_to_text(block: Block) -> str:
     """Join cells with " | " and keep empty cells, so values stay under their column headers."""
-    return "\n".join(" | ".join(row).strip(" |") for row in block.rows)
+    return "\n".join(" | ".join(row).rstrip(" |") for row in block.rows)
 
 
 def build_context(blocks: list[Block]) -> str:

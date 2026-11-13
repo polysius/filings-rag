@@ -91,7 +91,8 @@ def test_table_keeps_empty_cells_so_columns_line_up():
 
     context = build_context([table])
 
-    assert "2024 | 2023" in context
+    # The empty top-left cell stays, so each header sits above its own value column.
+    assert " | 2024 | 2023" in context
     assert "Total net sales |  | 5" in context
 
 

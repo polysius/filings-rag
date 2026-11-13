@@ -1,9 +1,8 @@
 """Run extraction over every parsed filing and score it against XBRL."""
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
-
-from pydantic import ValidationError
 
 from filings_rag.context import build_context
 from filings_rag.evaluate import FieldScore, render_results, score_document
@@ -11,6 +10,12 @@ from filings_rag.extractor import Completer, extract_filing
 from filings_rag.parser import Block
 from filings_rag.schema import SCORED_FIELDS, FilingExtraction
 from filings_rag.xbrl import reference_value
+
+
+@dataclass
+class CorpusRun:
+    scores: list[FieldScore]
+    failures: list[str]
 
 
 def load_blocks(parsed_path: Path) -> list[Block]:
@@ -22,7 +27,7 @@ def read_cached(path: Path) -> FilingExtraction | None:
     """Return a saved extraction, or None if there is none or the file is unreadable."""
     try:
         return FilingExtraction.model_validate_json(path.read_text(encoding="utf-8"))
-    except (OSError, ValidationError):
+    except (OSError, ValueError):  # ValueError covers bad UTF-8 and pydantic's ValidationError
         return None
 
 
@@ -60,7 +65,7 @@ def score_one(data_dir: Path, entry: dict, stem: str, extraction: FilingExtracti
     return score_document(stem, extraction, references)
 
 
-def extract_corpus(completer: Completer, data_dir: Path) -> list[FieldScore]:
+def extract_corpus(completer: Completer, data_dir: Path) -> CorpusRun:
     """Extract each parsed filing, then write `RESULTS.md`.
 
     Results already on disk are kept, so a rerun after a failure only repeats the failed filings.
@@ -79,7 +84,7 @@ def extract_corpus(completer: Completer, data_dir: Path) -> list[FieldScore]:
             failures.append(f"{stem}: {type(error).__name__}: {_first_line(error)}")
 
     (data_dir / "RESULTS.md").write_text(render_results(scores, failures), encoding="utf-8")
-    return scores
+    return CorpusRun(scores, failures)
 
 
 def _first_line(error: Exception) -> str:

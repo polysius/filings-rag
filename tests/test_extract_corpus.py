@@ -61,7 +61,7 @@ def test_score_field_outcomes():
 def test_extract_corpus_scores_against_xbrl_and_writes_results(tmp_path):
     write_corpus(tmp_path)
 
-    scores = extract_corpus(FakeCompleter(), tmp_path)
+    scores = extract_corpus(FakeCompleter(), tmp_path).scores
 
     outcomes = {s.field: s.outcome for s in scores}
     # total_assets has no XBRL value in the fixture, so it is not scored.
@@ -96,10 +96,22 @@ def test_corrupt_saved_extraction_is_extracted_again(tmp_path):
     (tmp_path / "extracted" / f"{STEM}.json").write_text('{"revenue": {"val')
     completer = FakeCompleter()
 
-    scores = extract_corpus(completer, tmp_path)
+    scores = extract_corpus(completer, tmp_path).scores
 
     assert completer.calls == 1
     assert len(scores) == 2
+
+
+def test_saved_extraction_cut_mid_character_is_extracted_again(tmp_path):
+    write_corpus(tmp_path)
+    (tmp_path / "extracted").mkdir()
+    (tmp_path / "extracted" / f"{STEM}.json").write_bytes(b'{"top_risk_factors": ["We\xe2\x80')
+    completer = FakeCompleter()
+
+    run = extract_corpus(completer, tmp_path)
+
+    assert completer.calls == 1
+    assert run.failures == []
 
 
 def test_one_failing_filing_does_not_stop_the_others(tmp_path):
@@ -109,9 +121,10 @@ def test_one_failing_filing_does_not_stop_the_others(tmp_path):
     (tmp_path / "manifest.json").write_text(json.dumps([broken, *manifest]))
     (tmp_path / "parsed" / "ACME_10-K_2023-12-31.json").write_text("not json")
 
-    scores = extract_corpus(FakeCompleter(), tmp_path)
+    run = extract_corpus(FakeCompleter(), tmp_path)
 
-    assert len(scores) == 2  # the good filing was still scored
+    assert len(run.scores) == 2  # the good filing was still scored
+    assert len(run.failures) == 1
     assert "- ACME_10-K_2023-12-31: JSONDecodeError" in (tmp_path / "RESULTS.md").read_text()
 
 

@@ -34,8 +34,13 @@ def main() -> None:
             f"Parsed {len(results) - failed} of {len(results)}; see {args.data / 'PARSING_REPORT.md'}"
         )
     elif args.command == "extract":
-        scores = extract_corpus(completer_from_env(), args.data)
-        print(f"Scored {len(scores)} fields; see {args.data / 'RESULTS.md'}")
+        run = extract_corpus(completer_from_env(), args.data)
+        print(
+            f"Scored {len(run.scores)} fields, {len(run.failures)} filings failed; "
+            f"see {args.data / 'RESULTS.md'}"
+        )
+        if run.failures:
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":
