@@ -4,6 +4,7 @@ from filings_rag.evaluate import CORRECT, MISSING, WRONG, score_field
 from filings_rag.extract_corpus import extract_corpus
 
 STEM = "ACME_10-Q_2024-09-30"
+ACCN = "0000000001-24-000001"
 REPLY = json.dumps(
     {
         "revenue": {"value": 300, "page": 1},
@@ -23,7 +24,7 @@ class FakeCompleter:
 
 def quarter_fact(value: int) -> dict:
     fact = {"val": value, "start": "2024-07-01", "end": "2024-09-30"}
-    fact |= {"form": "10-Q", "filed": "2024-11-01"}
+    fact |= {"form": "10-Q", "accn": ACCN}
     return {"units": {"USD": [fact]}}
 
 
@@ -34,6 +35,8 @@ def write_corpus(data_dir) -> None:
     manifest = [
         {
             "ticker": "ACME",
+            "company": "Acme Corp",
+            "accession_number": ACCN,
             "form": "10-Q",
             "period_of_report": "2024-09-30",
             "path": f"raw/{STEM}.htm",
@@ -84,4 +87,42 @@ def test_unparsed_filing_is_listed_as_a_failure(tmp_path):
 
     extract_corpus(FakeCompleter(), tmp_path)
 
-    assert f"- {STEM}: not parsed" in (tmp_path / "RESULTS.md").read_text()
+    assert f"- {STEM}: FileNotFoundError" in (tmp_path / "RESULTS.md").read_text()
+
+
+def test_corrupt_saved_extraction_is_extracted_again(tmp_path):
+    write_corpus(tmp_path)
+    (tmp_path / "extracted").mkdir()
+    (tmp_path / "extracted" / f"{STEM}.json").write_text('{"revenue": {"val')
+    completer = FakeCompleter()
+
+    scores = extract_corpus(completer, tmp_path)
+
+    assert completer.calls == 1
+    assert len(scores) == 2
+
+
+def test_one_failing_filing_does_not_stop_the_others(tmp_path):
+    write_corpus(tmp_path)
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    broken = {**manifest[0], "path": "raw/ACME_10-K_2023-12-31.htm"}
+    (tmp_path / "manifest.json").write_text(json.dumps([broken, *manifest]))
+    (tmp_path / "parsed" / "ACME_10-K_2023-12-31.json").write_text("not json")
+
+    scores = extract_corpus(FakeCompleter(), tmp_path)
+
+    assert len(scores) == 2  # the good filing was still scored
+    assert "- ACME_10-K_2023-12-31: JSONDecodeError" in (tmp_path / "RESULTS.md").read_text()
+
+
+def test_nan_value_is_rejected_and_not_saved(tmp_path):
+    write_corpus(tmp_path)
+
+    class NanCompleter:
+        def complete(self, system: str, user: str) -> str:
+            return '{"revenue": {"value": NaN, "page": 1}}'
+
+    extract_corpus(NanCompleter(), tmp_path)
+
+    assert not (tmp_path / "extracted" / f"{STEM}.json").exists()
+    assert f"- {STEM}: ExtractionError" in (tmp_path / "RESULTS.md").read_text()

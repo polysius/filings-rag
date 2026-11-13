@@ -8,7 +8,9 @@ MAX_RISK_FACTORS = 5
 class Amount(BaseModel):
     """A dollar amount and the page it was read from."""
 
-    value: float = Field(description="Amount in US dollars, not thousands or millions")
+    value: float = Field(
+        allow_inf_nan=False, description="Amount in US dollars, not thousands or millions"
+    )
     page: int = Field(ge=1, description="Page number shown in the [page N] marker")
 
 

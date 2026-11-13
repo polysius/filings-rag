@@ -26,20 +26,27 @@ INSTANT_FIELDS = {"total_assets"}  # balance sheet values have no start date
 DURATION_DAYS = {"10-K": (350, 380), "10-Q": (80, 100)}
 
 
-def reference_value(facts: dict, field: str, form: str, period_end: str) -> float | None:
-    """Return the XBRL value for `field` in the filing of `form` ending `period_end`, if any."""
+def reference_value(
+    facts: dict, field: str, form: str, period_end: str, accession: str
+) -> float | None:
+    """Return the XBRL value that the filing `accession` reported for `field`, if any.
+
+    Later filings repeat earlier periods as comparatives, and a recast there can differ from the
+    original. Matching the accession number keeps the value the filing itself reported.
+    """
     us_gaap = facts.get("facts", {}).get("us-gaap", {})
     for concept in CONCEPTS[field]:
         entries = us_gaap.get(concept, {}).get("units", {}).get("USD", [])
-        matches = [e for e in entries if _matches(e, field, form, period_end)]
+        matches = [e for e in entries if _matches(e, field, form, period_end, accession)]
         if matches:
-            # A later filing can restate a value, so the most recently filed one wins.
-            return max(matches, key=lambda e: e["filed"])["val"]
+            return matches[0]["val"]
     return None
 
 
-def _matches(entry: dict, field: str, form: str, period_end: str) -> bool:
-    if entry.get("form") != form or entry.get("end") != period_end:
+def _matches(entry: dict, field: str, form: str, period_end: str, accession: str) -> bool:
+    if entry.get("accn") != accession or entry.get("form") != form:
+        return False
+    if entry.get("end") != period_end:
         return False
     if field in INSTANT_FIELDS:
         return "start" not in entry

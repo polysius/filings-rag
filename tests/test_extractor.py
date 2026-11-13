@@ -1,6 +1,6 @@
 import pytest
 
-from filings_rag.context import build_context
+from filings_rag.context import MAX_RISK_CHARACTERS, build_context
 from filings_rag.extractor import ExtractionError, extract_filing
 from filings_rag.parser import Block
 
@@ -70,3 +70,43 @@ def test_context_keeps_keyword_tables_and_risk_text_with_pages():
     assert "[page 7] (table)\nTotal revenues | $ | 1,000" in context
     assert "Unrelated" not in context
     assert "Employees" not in context
+
+
+def test_risk_text_is_cut_at_the_limit_even_for_one_long_block():
+    blocks = [Block("text", 2, "Item 1A. Risk Factors", text="x" * 50_000)]
+
+    context = build_context(blocks)
+
+    assert len(context) < MAX_RISK_CHARACTERS + 100
+
+
+def test_risk_headings_are_included():
+    blocks = [Block("heading", 2, "Item 1A. Risk Factors", text="We face intense competition.")]
+
+    assert "We face intense competition." in build_context(blocks)
+
+
+def test_table_keeps_empty_cells_so_columns_line_up():
+    table = Block("table", 4, "Item 8", rows=[["", "2024", "2023"], ["Total net sales", "", "5"]])
+
+    context = build_context([table])
+
+    assert "2024 | 2023" in context
+    assert "Total net sales |  | 5" in context
+
+
+def test_table_context_includes_the_units_line_above_it():
+    blocks = [
+        Block("text", 4, "Item 8", text="(In millions, except per-share amounts)"),
+        Block("table", 4, "Item 8", rows=[["Total net sales", "391,035"]]),
+    ]
+
+    assert "(In millions" in build_context(blocks)
+
+
+def test_description_is_part_of_the_prompt():
+    completer = FakeCompleter([VALID_REPLY])
+
+    extract_filing(completer, "context", "Acme 10-Q ending 2024-09-30")
+
+    assert "Acme 10-Q ending 2024-09-30" in completer.user_prompts[0]

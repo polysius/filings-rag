@@ -6,6 +6,7 @@ copies that page into its answer.
 """
 
 import re
+from dataclasses import replace
 
 from filings_rag.parser import Block
 
@@ -18,29 +19,51 @@ RISK_SECTION_RE = re.compile(r"^item\s+1a\b", re.IGNORECASE)
 
 MAX_TABLES = 25
 MAX_RISK_CHARACTERS = 6_000
+CAPTION_BLOCKS = 3  # blocks above a table that may hold its title and units
+MAX_CAPTION = 200
 
 
 def table_to_text(block: Block) -> str:
-    return "\n".join(" | ".join(cell for cell in row if cell) for row in block.rows)
+    """Join cells with " | " and keep empty cells, so values stay under their column headers."""
+    return "\n".join(" | ".join(row).strip(" |") for row in block.rows)
 
 
 def build_context(blocks: list[Block]) -> str:
     """Return prompt text made of risk factor excerpts and keyword-matching tables."""
     parts = [f"[page {b.page}] (risk factors)\n{b.text}" for b in _risk_blocks(blocks)]
-    tables = [b for b in blocks if b.kind == "table" and TABLE_KEYWORDS.search(table_to_text(b))]
-    parts += [f"[page {b.page}] (table)\n{table_to_text(b)}" for b in tables[:MAX_TABLES]]
+    matched = 0
+    for index, block in enumerate(blocks):
+        if block.kind == "table" and TABLE_KEYWORDS.search(table_to_text(block)):
+            parts.append(_table_with_caption(blocks, index))
+            matched += 1
+            if matched == MAX_TABLES:
+                break
     return "\n\n".join(parts)
 
 
+def _table_with_caption(blocks: list[Block], index: int) -> str:
+    """A table with the short blocks just above it on the same page.
+
+    These usually hold the statement title and the "(in millions)" line that sets the scale.
+    """
+    table = blocks[index]
+    captions = []
+    for above in reversed(blocks[max(0, index - CAPTION_BLOCKS) : index]):
+        if above.kind == "table" or above.page != table.page or len(above.text) > MAX_CAPTION:
+            break
+        captions.insert(0, above.text)
+    return "\n".join([f"[page {table.page}] (table)", *captions, table_to_text(table)])
+
+
 def _risk_blocks(blocks: list[Block]) -> list[Block]:
-    """Text blocks under Item 1A, up to MAX_RISK_CHARACTERS in total."""
-    selected, used = [], 0
+    """Headings and text under Item 1A, cut so the total stays within MAX_RISK_CHARACTERS."""
+    selected, remaining = [], MAX_RISK_CHARACTERS
     for block in blocks:
         in_risk_section = bool(block.section and RISK_SECTION_RE.match(block.section))
-        if block.kind != "text" or not in_risk_section:
+        if block.kind == "table" or not in_risk_section:
             continue
-        if used >= MAX_RISK_CHARACTERS:
+        if remaining <= 0:
             break
-        selected.append(block)
-        used += len(block.text)
+        selected.append(replace(block, text=block.text[:remaining]))
+        remaining -= len(block.text)
     return selected

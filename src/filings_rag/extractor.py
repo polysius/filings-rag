@@ -57,12 +57,14 @@ class ExtractionError(Exception):
 
 
 def extract_filing(
-    completer: Completer, context: str, max_attempts: int = MAX_ATTEMPTS
+    completer: Completer, context: str, description: str = "", max_attempts: int = MAX_ATTEMPTS
 ) -> FilingExtraction:
     """Ask for the fields, and on invalid output show the model its error and ask again."""
     schema = json.dumps(FilingExtraction.model_json_schema())
     system = SYSTEM_PROMPT.format(schema=schema)
-    user = f"Filing excerpts:\n\n{context}"
+    header = f"Filing: {description}\n\n" if description else ""
+    prompt = f"{header}Filing excerpts:\n\n{context}"
+    user = prompt
 
     last_error = ""
     for _ in range(max_attempts):
@@ -72,7 +74,7 @@ def extract_filing(
         except ValidationError as error:
             last_error = str(error)
             user = (
-                f"Filing excerpts:\n\n{context}\n\n"
+                f"{prompt}\n\n"
                 f"Your previous answer was invalid:\n{last_error}\nReturn corrected JSON only."
             )
     raise ExtractionError(f"No valid output after {max_attempts} attempts: {last_error}")
