@@ -51,7 +51,9 @@ class Bm25Index:
 
     def _score(self, terms: set[str], index: int) -> float:
         counts = self._term_counts[index]
-        length_norm = 1 - B + B * self._lengths[index] / self._average_length
+        # An index with no words at all has an average length of 0, but then nothing matches.
+        average_length = self._average_length or 1.0
+        length_norm = 1 - B + B * self._lengths[index] / average_length
         score = 0.0
         for term in terms:
             frequency = counts.get(term, 0)

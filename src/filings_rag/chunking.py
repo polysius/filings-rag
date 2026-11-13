@@ -75,11 +75,16 @@ def _pieces(blocks: list[Block], target: int) -> list[Piece]:
 
 
 def _split(text: str, target: int) -> list[str]:
-    """Cut text longer than `target` at a line break or space, so words stay whole."""
+    """Cut text longer than `target` at a line break, else a space, so words stay whole.
+
+    A line break comes first so that a long table is cut between rows and not inside one.
+    """
     parts = []
     while len(text) > target:
         window = text[:target]
-        cut = max(window.rfind("\n"), window.rfind(" "))
+        cut = window.rfind("\n")
+        if cut <= 0:
+            cut = window.rfind(" ")
         if cut <= 0:
             cut = target
         parts.append(text[:cut].strip())

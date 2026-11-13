@@ -81,5 +81,15 @@ def test_chunk_ids_are_numbered_per_document_and_spans_can_be_queried():
     assert not chunks[0].spans_page(2)
 
 
+def test_a_long_table_is_cut_between_rows():
+    rows = [[f"Line item {n}", f"${n},000"] for n in range(60)]
+
+    chunks = chunk_by_section("DOC", [Block("table", 5, "Item 8", rows=rows)], target=200)
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert all(line.startswith("Line item ") for line in chunk.text.splitlines())
+
+
 def test_empty_blocks_make_no_chunks():
     assert chunk_fixed("DOC", [text(1, "A", "   ")]) == []

@@ -101,17 +101,20 @@ chunk records the pages it spans, so an answer built from it can cite a page. `b
 chunks by keyword match.
 
 `make eval-retrieval` compares the strategies on a question set you label by hand and writes
-`data/RETRIEVAL_RESULTS.md`. Put one JSON object per line in `data/questions.jsonl`:
+`data/RETRIEVAL_RESULTS.md`. Put one JSON object per line in `data/questions.jsonl`, or pass
+another file with `--questions`:
 
 ```
-{"question": "What does the company say about supplier concentration?",
- "document": "AAPL_10-K_2024-09-28", "answer": "...", "evidence": "..."}
+{"question": "What does the company say about supplier concentration?", "document": "AAPL_10-K_2024-09-28", "answer": "...", "evidence": "..."}
 ```
 
-`document` is the file name in `data/raw/` without its extension. `evidence` is a sentence or table
-row copied from the filing, and it must appear in the parsed text. Gold pages are the pages of the
-parsed blocks that contain it, so labels follow the parser's physical page numbers and survive a
-re-parse. They are not the page numbers printed in the filing.
+Every line needs all four fields with text in them. A line that is not valid reports its line
+number and stops the run. `document` is the file name in `data/raw/` without its extension.
+`evidence` is a sentence or table row copied from the filing. It must sit inside one paragraph or
+one table of the parsed text, so text that runs across a page break is not found. Case and
+punctuation are ignored when matching. Gold pages are the pages of the parsed blocks that contain
+the evidence, so labels follow the parser's physical page numbers and survive a re-parse. They are
+not the page numbers printed in the filing.
 
 Recall@k counts a question as found when one of the top k chunks of that filing spans a gold page.
 Search is limited to the filing each question is about, because the filers share near identical

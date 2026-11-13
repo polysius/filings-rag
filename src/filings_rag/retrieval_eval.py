@@ -4,7 +4,8 @@ A question file holds one JSON object per line:
 
     {"question": "...", "document": "AAPL_10-K_2024-09-28", "answer": "...", "evidence": "..."}
 
-`evidence` is a sentence or table row copied from the filing. Gold pages are the pages of the
+`evidence` is a sentence or table row copied from the filing, from within one paragraph or one
+table. Words are compared without punctuation or case. Gold pages are the pages of the
 parsed blocks that contain it, so labels follow the parser's physical page numbers and survive a
 re-parse. A retrieved chunk is a hit when its page span contains a gold page.
 """
@@ -34,18 +35,56 @@ class EvidenceNotFound(Exception):
     """The evidence snippet of a question does not appear in its filing."""
 
 
+class QuestionFileError(Exception):
+    """A line of the question file is not a valid question."""
+
+
+QUESTION_FIELDS = ("question", "document", "answer", "evidence")
+
+
 def load_questions(path: Path) -> list[Question]:
-    lines = path.read_text(encoding="utf-8").splitlines()
-    return [Question(**json.loads(line)) for line in lines if line.strip()]
+    # utf-8-sig, because Windows tools often write a byte order mark at the start of the file.
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    questions = []
+    for number, line in enumerate(lines, start=1):
+        if line.strip():
+            questions.append(_parse_question(line, f"{path}:{number}"))
+    return questions
+
+
+def _parse_question(line: str, where: str) -> Question:
+    try:
+        row = json.loads(line)
+    except json.JSONDecodeError as error:
+        raise QuestionFileError(f"{where}: not valid JSON ({error.msg})") from error
+    if not isinstance(row, dict):
+        raise QuestionFileError(f"{where}: expected a JSON object")
+    problems = [f for f in QUESTION_FIELDS if not isinstance(row.get(f), str) or not row[f].strip()]
+    if problems:
+        raise QuestionFileError(f"{where}: missing or empty text in {', '.join(problems)}")
+    return Question(**{field: row[field] for field in QUESTION_FIELDS})
+
+
+# Zero width space, non-joiner, joiner and byte order mark, which the parser also removes.
+ZERO_WIDTH_CODE_POINTS = (0x200B, 0x200C, 0x200D, 0xFEFF)
+ZERO_WIDTH_RE = re.compile("[" + "".join(chr(code) for code in ZERO_WIDTH_CODE_POINTS) + "]")
+WORD_RE = re.compile(r"\w+")
 
 
 def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().lower()
+    """Lowercase words separated by single spaces.
+
+    Punctuation and symbols are dropped on both sides, so evidence copied from a browser still
+    matches the parsed text, where a table row is joined with " | " and "$" has its own cell.
+    """
+    return " ".join(WORD_RE.findall(ZERO_WIDTH_RE.sub("", text).lower()))
 
 
 def gold_pages(blocks: list[Block], evidence: str) -> set[int]:
     """Pages of every block that contains the evidence snippet."""
     needle = normalize(evidence)
+    if not needle:
+        raise EvidenceNotFound(evidence)
     pages = {b.page for b in blocks if needle in normalize(block_text(b))}
     if not pages:
         raise EvidenceNotFound(evidence)
@@ -125,8 +164,12 @@ def render_results(
     return "\n".join(lines) + "\n"
 
 
-def evaluate_corpus(data_dir: Path, questions_path: Path) -> str:
-    """Score every strategy over the parsed corpus and write `RETRIEVAL_RESULTS.md`."""
+def evaluate_corpus(data_dir: Path, questions_path: Path | None = None) -> str:
+    """Score every strategy over the parsed corpus and write `RETRIEVAL_RESULTS.md`.
+
+    Without `questions_path` the questions are read from `questions.jsonl` in `data_dir`, and a
+    missing file means no questions yet. A path that is given but missing is an error.
+    """
     manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
     documents = {}
     for entry in manifest:
@@ -135,7 +178,11 @@ def evaluate_corpus(data_dir: Path, questions_path: Path) -> str:
         if parsed_path.exists():
             documents[stem] = load_blocks(parsed_path)
 
-    questions = load_questions(questions_path) if questions_path.exists() else []
+    if questions_path is None:
+        default_path = data_dir / "questions.jsonl"
+        questions = load_questions(default_path) if default_path.exists() else []
+    else:
+        questions = load_questions(questions_path)  # raises if the file is missing
     results, scored, problems = evaluate_strategies(documents, questions)
     report = render_results(results, scored, problems)
     (data_dir / "RETRIEVAL_RESULTS.md").write_text(report, encoding="utf-8")

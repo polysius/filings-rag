@@ -6,6 +6,7 @@ from filings_rag.parser import Block
 from filings_rag.retrieval_eval import (
     EvidenceNotFound,
     Question,
+    QuestionFileError,
     evaluate_corpus,
     evaluate_strategies,
     gold_pages,
@@ -123,9 +124,74 @@ def test_evaluate_corpus_writes_the_report(tmp_path):
 def test_evaluate_corpus_without_a_question_file_reports_not_measured(tmp_path):
     write_corpus(tmp_path, None)
 
-    evaluate_corpus(tmp_path, tmp_path / "questions.jsonl")
+    evaluate_corpus(tmp_path)
 
     assert "Not measured" in (tmp_path / "RETRIEVAL_RESULTS.md").read_text()
+
+
+def test_blank_or_punctuation_only_evidence_is_never_found():
+    for evidence in ("", "   ", "."):
+        with pytest.raises(EvidenceNotFound):
+            gold_pages(blocks(), evidence)
+
+
+def test_evidence_copied_from_a_browser_table_matches():
+    assert gold_pages(blocks(), "Total net sales\t1,000") == {3}
+    assert gold_pages(blocks(), "total NET sales $1,000") == {3}
+
+
+def test_zero_width_characters_in_evidence_are_ignored():
+    assert gold_pages(blocks(), "single\u200b supplier") == {2}
+
+
+def test_load_questions_reports_the_line_number_of_a_bad_line(tmp_path):
+    path = tmp_path / "q.jsonl"
+    good = json.dumps({"question": "q", "document": DOC, "answer": "a", "evidence": "e"})
+    path.write_text(f"{good}\n{good}\nnot json\n")
+
+    with pytest.raises(QuestionFileError, match=r"q\.jsonl:3: not valid JSON"):
+        load_questions(path)
+
+
+@pytest.mark.parametrize(
+    "row, message",
+    [
+        ({"question": "q", "document": DOC, "answer": "a"}, "evidence"),
+        ({"question": "q", "document": DOC, "answer": "a", "evidence": None}, "evidence"),
+        ({"question": "q", "document": DOC, "answer": "a", "evidence": " "}, "evidence"),
+        (["not", "an", "object"], "expected a JSON object"),
+    ],
+)
+def test_load_questions_rejects_incomplete_rows(tmp_path, row, message):
+    path = tmp_path / "q.jsonl"
+    path.write_text(json.dumps(row) + "\n")
+
+    with pytest.raises(QuestionFileError, match=message):
+        load_questions(path)
+
+
+def test_load_questions_ignores_extra_keys_and_a_byte_order_mark(tmp_path):
+    path = tmp_path / "q.jsonl"
+    row = {"question": "q", "document": DOC, "answer": "a", "evidence": "e", "note": "x"}
+    path.write_bytes(b"\xef\xbb\xbf" + json.dumps(row).encode() + b"\n")
+
+    assert load_questions(path) == [Question("q", DOC, "a", "e")]
+
+
+def test_a_given_questions_file_that_is_missing_is_an_error(tmp_path):
+    write_corpus(tmp_path, None)
+
+    with pytest.raises(FileNotFoundError):
+        evaluate_corpus(tmp_path, tmp_path / "typo.jsonl")
+
+
+def test_default_questions_file_is_read_from_the_data_directory(tmp_path):
+    row = {"question": "supply chain", "document": DOC, "answer": "a", "evidence": "single"}
+    write_corpus(tmp_path, [row])
+
+    evaluate_corpus(tmp_path)
+
+    assert "| section | 100.0% |" in (tmp_path / "RETRIEVAL_RESULTS.md").read_text()
 
 
 def test_load_questions_skips_blank_lines(tmp_path):

@@ -49,6 +49,12 @@ def test_no_match_and_an_empty_index_return_nothing():
     assert Bm25Index([]).search("revenue", k=3) == []
 
 
+def test_an_index_with_no_words_does_not_divide_by_zero():
+    index = Bm25Index([chunk(0, "$ | %"), chunk(1, "* * *")])
+
+    assert index.search("risk", k=3) == []
+
+
 def test_matching_ignores_case_and_punctuation():
     index = Bm25Index([chunk(0, "Net Income, in millions")])
 
