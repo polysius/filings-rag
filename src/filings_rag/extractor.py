@@ -52,7 +52,7 @@ class AnthropicCompleter:
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
         )
-        if response.stop_reason in ("refusal", "max_tokens"):
+        if response.stop_reason not in ("end_turn", "stop_sequence"):
             raise CompletionError(f"Model stopped early: {response.stop_reason}")
         return "".join(block.text for block in response.content if block.type == "text")
 

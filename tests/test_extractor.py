@@ -159,7 +159,7 @@ def test_anthropic_completer_call_matches_the_sdk_signature(monkeypatch):
     inspect.signature(Messages.create).bind(None, **calls[0])  # raises TypeError on a bad keyword
 
 
-@pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
+@pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens", "model_context_window_exceeded"])
 def test_anthropic_completer_rejects_an_incomplete_answer(monkeypatch, stop_reason):
     completer, _ = completer_with_response(monkeypatch, FakeResponse(stop_reason))
 
