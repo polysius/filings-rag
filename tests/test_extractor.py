@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from filings_rag.context import MAX_RISK_CHARACTERS, build_context
+from filings_rag.context import MAX_RISK_CHARACTERS, MAX_TABLES, build_context
 from filings_rag.extractor import (
     AnthropicCompleter,
     CompletionError,
@@ -165,3 +165,18 @@ def test_anthropic_completer_rejects_an_incomplete_answer(monkeypatch, stop_reas
 
     with pytest.raises(CompletionError):
         completer.complete("system", "user")
+
+
+def test_statements_are_kept_when_earlier_tables_fill_the_limit():
+    md_and_a_tables = [
+        Block("table", 10, "Item 7", rows=[[f"Segment {n} revenue", "5"]]) for n in range(30)
+    ]
+    income = Block("table", 60, "Item 8", rows=[["Total net sales", "100"], ["Net income", "9"]])
+    balance = Block("table", 61, "Item 8", rows=[["Total assets", "500"]])
+
+    context = build_context([*md_and_a_tables, income, balance])
+
+    assert "Total net sales | 100" in context
+    assert "Total assets | 500" in context
+    assert context.count("(table)") == MAX_TABLES
+    assert context.index("Segment 0 revenue") < context.index("Total net sales")  # document order

@@ -83,8 +83,9 @@ Known limits:
 
 - Only the first 6,000 characters of Item 1A are sent, so the risk factors reflect the start of
   the section rather than a ranking of the whole section.
-- Context is picked by keyword. A statement table that never uses these words is not sent, and
-  only the first 25 matching tables in document order are sent.
+- Context is picked by keyword. A statement table that never uses these words is not sent. At
+  most 25 matching tables are sent, and tables that look like financial statements come first, so
+  MD&A and note tables cannot push the statements out.
 - The reference value is the one the filing itself reported, matched by accession number. A later
   filing that recasts the same period is not used.
 - Filings whose extraction failed are listed under failures and are not counted in the accuracy.

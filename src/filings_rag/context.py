@@ -15,6 +15,11 @@ TABLE_KEYWORDS = re.compile(
     r"|total assets|segment",
     re.IGNORECASE,
 )
+STATEMENT_TITLE_RE = re.compile(
+    r"statements? of (?:consolidated )?(?:operations|income|earnings|financial (?:position|condition))"
+    r"|balance sheets?",
+    re.IGNORECASE,
+)
 RISK_SECTION_RE = re.compile(r"^item\s+1a\b", re.IGNORECASE)
 
 MAX_TABLES = 25
@@ -31,18 +36,40 @@ def table_to_text(block: Block) -> str:
 def build_context(blocks: list[Block]) -> str:
     """Return prompt text made of risk factor excerpts and keyword-matching tables."""
     parts = [f"[page {b.page}] (risk factors)\n{b.text}" for b in _risk_blocks(blocks)]
-    matched = 0
-    for index, block in enumerate(blocks):
-        if block.kind == "table" and TABLE_KEYWORDS.search(table_to_text(block)):
-            parts.append(_table_with_caption(blocks, index))
-            matched += 1
-            if matched == MAX_TABLES:
-                break
+    parts += [_render_table(blocks[index], captions) for index, captions in _chosen_tables(blocks)]
     return "\n\n".join(parts)
 
 
-def _table_with_caption(blocks: list[Block], index: int) -> str:
-    """A table with the short blocks just above it on the same page.
+def _chosen_tables(blocks: list[Block]) -> list[tuple[int, list[str]]]:
+    """Up to MAX_TABLES keyword-matching tables, financial statements first.
+
+    MD&A and note tables also mention revenue and segments and come before the statements in
+    Item 8, so taking the first matches in document order could cut the statements. The chosen
+    tables are returned in document order.
+    """
+    candidates = []
+    for index, block in enumerate(blocks):
+        text = table_to_text(block) if block.kind == "table" else ""
+        if TABLE_KEYWORDS.search(text):
+            captions = _captions_above(blocks, index)
+            candidates.append((not _is_statement(captions, text), index, captions))
+    chosen = sorted(candidates)[:MAX_TABLES]  # False sorts first, then document order
+    return [(index, captions) for _, index, captions in sorted(chosen, key=lambda c: c[1])]
+
+
+def _is_statement(captions: list[str], text: str) -> bool:
+    """A statement has a statement title above it, or balance sheet or income statement rows."""
+    if STATEMENT_TITLE_RE.search(" ".join(captions)):
+        return True
+    has_balance_sheet_row = bool(re.search(r"total assets", text, re.IGNORECASE))
+    has_income_rows = bool(re.search(r"net income|net earnings", text, re.IGNORECASE)) and bool(
+        re.search(r"total revenues?|net sales|revenues?\b", text, re.IGNORECASE)
+    )
+    return has_balance_sheet_row or has_income_rows
+
+
+def _captions_above(blocks: list[Block], index: int) -> list[str]:
+    """The short blocks just above a table on the same page.
 
     These usually hold the statement title and the "(in millions)" line that sets the scale.
     """
@@ -52,6 +79,10 @@ def _table_with_caption(blocks: list[Block], index: int) -> str:
         if above.kind == "table" or above.page != table.page or len(above.text) > MAX_CAPTION:
             break
         captions.insert(0, above.text)
+    return captions
+
+
+def _render_table(table: Block, captions: list[str]) -> str:
     return "\n".join([f"[page {table.page}] (table)", *captions, table_to_text(table)])
 
 
