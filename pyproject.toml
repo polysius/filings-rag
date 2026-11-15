@@ -30,3 +30,5 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
+# A copy of the bridge from nl-analytics-agent, kept as it is there.
+extend-exclude = ["scripts/claude_cli_bridge.py"]

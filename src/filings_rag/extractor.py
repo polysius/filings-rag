@@ -13,6 +13,8 @@ BRIDGE_URL = "http://127.0.0.1:8787/v1"  # where scripts/claude_cli_bridge.py li
 MODEL = "opus"  # a model alias the bridge passes to `claude --model`
 # The bridge stops a call after 180 seconds, so wait a little longer than that.
 REQUEST_TIMEOUT_SECONDS = 200
+START_COMMAND = "python scripts/claude_cli_bridge.py"
+MAX_ERROR_CHARACTERS = 300
 MAX_ATTEMPTS = 3
 
 SYSTEM_PROMPT = """You extract key fields from SEC 10-K and 10-Q filings.
@@ -40,8 +42,8 @@ class CompletionError(Exception):
 class BridgeCompleter:
     """Asks the local Claude Code bridge, which runs the signed in `claude` CLI.
 
-    The bridge speaks the OpenAI chat format. Start it with `make bridge`. No API key is needed,
-    and the calls count against the Claude Code plan that is signed in on this machine.
+    The bridge speaks the OpenAI chat format. No API key is needed, and the calls count against
+    the Claude Code plan that is signed in on this machine.
     """
 
     def __init__(
@@ -50,9 +52,10 @@ class BridgeCompleter:
         model: str | None = None,
         client: httpx.Client | None = None,
     ):
-        base_url = base_url or os.environ.get("LLM_BASE_URL", BRIDGE_URL)
+        # An environment variable that is set but empty counts as not set.
+        base_url = base_url or os.environ.get("LLM_BASE_URL") or BRIDGE_URL
         self._url = base_url.rstrip("/") + "/chat/completions"
-        self._model = model or os.environ.get("LLM_MODEL", MODEL)
+        self._model = model or os.environ.get("LLM_MODEL") or MODEL
         self._client = client or httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS)
 
     def complete(self, system: str, user: str) -> str:
@@ -65,13 +68,46 @@ class BridgeCompleter:
         }
         try:
             response = self._client.post(self._url, json=payload)
-        except httpx.TransportError as error:
+        except httpx.ConnectError as error:
             raise CompletionError(
-                f"Cannot reach the bridge at {self._url}. Start it with `make bridge`."
+                f"Cannot reach the bridge at {self._url}. "
+                f"Start it with `{START_COMMAND}` (or `make bridge`)."
             ) from error
+        except httpx.TimeoutException as error:
+            raise CompletionError(
+                f"The bridge at {self._url} did not answer within {REQUEST_TIMEOUT_SECONDS} seconds"
+            ) from error
+        except httpx.HTTPError as error:
+            raise CompletionError(
+                f"The request to {self._url} failed: {type(error).__name__}: {error}"
+            ) from error
+
         if response.is_error:
-            raise CompletionError(f"The bridge returned {response.status_code}: {response.text}")
-        return response.json()["choices"][0]["message"]["content"]
+            raise CompletionError(
+                f"The bridge returned {response.status_code}: {_error_message(response)}"
+            )
+        return _reply_text(response)
+
+
+def _error_message(response: httpx.Response) -> str:
+    """The bridge's own error message when it sent one, cut short, else the start of the body."""
+    try:
+        text = str(response.json()["error"]["message"])
+    except (ValueError, KeyError, TypeError):
+        text = response.text
+    return text[:MAX_ERROR_CHARACTERS]
+
+
+def _reply_text(response: httpx.Response) -> str:
+    try:
+        text = response.json()["choices"][0]["message"]["content"]
+    except (ValueError, KeyError, IndexError, TypeError) as error:
+        raise CompletionError(
+            f"Expected an OpenAI style chat reply but got: {response.text[:MAX_ERROR_CHARACTERS]}"
+        ) from error
+    if not isinstance(text, str):
+        raise CompletionError("The bridge reply has no text")
+    return text
 
 
 def completer_from_env() -> BridgeCompleter:

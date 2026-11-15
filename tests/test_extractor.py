@@ -209,6 +209,58 @@ def test_a_bridge_error_is_reported_with_its_message():
         completer.complete("system", "user")
 
 
+@pytest.mark.parametrize(
+    "reply",
+    [
+        httpx.Response(200, text="hello"),
+        httpx.Response(200, json={"object": "list"}),
+        httpx.Response(200, json={"choices": []}),
+        httpx.Response(200, json=[1, 2]),
+        httpx.Response(200, json={"choices": [{"message": {"content": None}}]}),
+        httpx.Response(302),
+    ],
+)
+def test_an_unexpected_reply_is_a_completion_error(reply):
+    with pytest.raises(CompletionError):
+        bridge_with(lambda request: reply).complete("system", "user")
+
+
+def test_an_empty_environment_variable_counts_as_not_set(monkeypatch):
+    monkeypatch.setenv("LLM_BASE_URL", "")
+    monkeypatch.setenv("LLM_MODEL", "")
+    handler = RecordingHandler()
+
+    bridge_with(handler).complete("sys", "usr")
+
+    request = handler.requests[0]
+    assert str(request.url) == "http://127.0.0.1:8787/v1/chat/completions"
+    assert json.loads(request.content)["model"] == "opus"
+
+
+def test_a_long_error_body_is_cut_short():
+    completer = bridge_with(lambda request: httpx.Response(503, text="x" * 100_000))
+
+    with pytest.raises(CompletionError) as raised:
+        completer.complete("system", "user")
+
+    assert len(str(raised.value)) < 400
+
+
+def test_a_timeout_is_not_reported_as_a_missing_bridge():
+    def handler(request):
+        raise httpx.ReadTimeout("slow")
+
+    with pytest.raises(CompletionError, match="did not answer"):
+        bridge_with(handler).complete("system", "user")
+
+
+def test_a_bad_address_reports_the_real_problem():
+    completer = BridgeCompleter(base_url="no-scheme-address")
+
+    with pytest.raises(CompletionError, match="UnsupportedProtocol"):
+        completer.complete("system", "user")
+
+
 def test_a_bridge_that_is_not_running_says_how_to_start_it():
     def handler(request):
         raise httpx.ConnectError("refused")
