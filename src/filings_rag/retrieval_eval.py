@@ -1,4 +1,6 @@
-"""Measure retrieval recall for each chunking strategy on a hand-labeled question set.
+"""Measure retrieval recall for each chunking strategy and method on a hand-labeled question set.
+
+The methods are BM25, dense search, hybrid search and hybrid search followed by a reranker.
 
 A question file holds one JSON object per line:
 
@@ -12,15 +14,29 @@ re-parse. A retrieved chunk is a hit when its page span contains a gold page.
 
 import json
 import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from filings_rag.bm25 import Bm25Index
-from filings_rag.chunking import STRATEGIES, block_text
+from filings_rag.chunking import STRATEGIES, Chunk, block_text
+from filings_rag.dense import DenseIndex, Embedder, InMemoryDenseIndex
 from filings_rag.extract_corpus import load_blocks
 from filings_rag.parser import Block
+from filings_rag.retrievers import (
+    DenseRetriever,
+    HybridRetriever,
+    Reranker,
+    RerankingRetriever,
+    Retriever,
+)
 
 RECALL_CUTOFFS = (1, 5, 10)
+
+# Recall at each cutoff, for each (chunking strategy, retrieval method).
+Results = dict[tuple[str, str], dict[int, float]]
+# Builds a dense index from a table name, chunks and their vectors.
+IndexFactory = Callable[[str, list[Chunk], Sequence[Sequence[float]]], DenseIndex]
 
 
 @dataclass(frozen=True)
@@ -91,9 +107,17 @@ def gold_pages(blocks: list[Block], evidence: str) -> set[int]:
     return pages
 
 
-def recall_at(index: Bm25Index, question: Question, pages: set[int], cutoffs: tuple[int, ...]):
+def in_memory_index(
+    table: str, chunks: list[Chunk], vectors: Sequence[Sequence[float]]
+) -> InMemoryDenseIndex:
+    return InMemoryDenseIndex(chunks, vectors)  # there is no table to name
+
+
+def recall_at(
+    retriever: Retriever, question: Question, pages: set[int], cutoffs: tuple[int, ...]
+) -> dict[int, bool]:
     """For each cutoff, whether a top-k chunk of the question's filing spans a gold page."""
-    hits = index.search(question.question, max(cutoffs), document=question.document)
+    hits = retriever.search(question.question, max(cutoffs), document=question.document)
     return {
         k: any(chunk_hit.chunk.spans_page(page) for chunk_hit in hits[:k] for page in pages)
         for k in cutoffs
@@ -101,21 +125,58 @@ def recall_at(index: Bm25Index, question: Question, pages: set[int], cutoffs: tu
 
 
 def evaluate_strategies(
-    documents: dict[str, list[Block]], questions: list[Question]
-) -> tuple[dict[str, dict[int, float]], int, list[str]]:
-    """Return recall@k per strategy, the number of scored questions and the unscorable ones."""
+    documents: dict[str, list[Block]],
+    questions: list[Question],
+    embedder: Embedder | None = None,
+    reranker: Reranker | None = None,
+    make_index: IndexFactory = in_memory_index,
+) -> tuple[Results, int, list[str]]:
+    """Return recall@k per chunking strategy and method, the number of scored questions and the
+    questions that could not be scored.
+
+    BM25 is always scored. With an `embedder` the dense and hybrid methods are scored too, and
+    with a `reranker` as well, hybrid search followed by reranking.
+    """
     scorable, problems = _find_gold_pages(documents, questions)
 
-    results = {}
-    for name, chunker in STRATEGIES.items():
+    results: Results = {}
+    for strategy, chunker in STRATEGIES.items():
         chunks = [c for stem, blocks in documents.items() for c in chunker(stem, blocks)]
-        index = Bm25Index(chunks)
-        found = {k: 0 for k in RECALL_CUTOFFS}
-        for question, pages in scorable:
-            for k, hit in recall_at(index, question, pages, RECALL_CUTOFFS).items():
-                found[k] += hit
-        results[name] = {k: found[k] / len(scorable) if scorable else 0.0 for k in RECALL_CUTOFFS}
+        retrievers = _build_retrievers(strategy, chunks, scorable, embedder, reranker, make_index)
+        for method, retriever in retrievers.items():
+            found = {k: 0 for k in RECALL_CUTOFFS}
+            for question, pages in scorable:
+                for k, hit in recall_at(retriever, question, pages, RECALL_CUTOFFS).items():
+                    found[k] += hit
+            results[(strategy, method)] = {
+                k: found[k] / len(scorable) if scorable else 0.0 for k in RECALL_CUTOFFS
+            }
     return results, len(scorable), problems
+
+
+def _build_retrievers(
+    strategy: str,
+    chunks: list[Chunk],
+    scorable: list[tuple[Question, set[int]]],
+    embedder: Embedder | None,
+    reranker: Reranker | None,
+    make_index: IndexFactory,
+) -> dict[str, Retriever]:
+    bm25 = Bm25Index(chunks)
+    retrievers: dict[str, Retriever] = {"bm25": bm25}
+    if embedder is None:
+        return retrievers
+
+    # Each question searches only its own filing, so only those filings need embedding.
+    asked_about = {question.document for question, _ in scorable}
+    needed = [chunk for chunk in chunks if chunk.document in asked_about]
+    vectors = embedder.embed_documents([chunk.text for chunk in needed])
+    dense = DenseRetriever(embedder, make_index(f"chunks_{strategy}", needed, vectors))
+    hybrid = HybridRetriever([bm25, dense])
+    retrievers |= {"dense": dense, "hybrid": hybrid}
+    if reranker is not None:
+        retrievers["hybrid+rerank"] = RerankingRetriever(hybrid, reranker)
+    return retrievers
 
 
 def _find_gold_pages(
@@ -137,26 +198,24 @@ def _find_gold_pages(
     return scorable, problems
 
 
-def render_results(
-    results: dict[str, dict[int, float]], question_count: int, problems: list[str]
-) -> str:
+def render_results(results: Results, question_count: int, problems: list[str]) -> str:
     lines = ["# Retrieval results", ""]
     if not results or question_count == 0:
         lines += ["Not measured: there are no scorable questions yet.", ""]
     else:
         introduction = (
-            f"BM25 over {question_count} questions, searching only the filing each question is "
-            "about. A hit means a top-k chunk spans a page that holds the evidence."
+            f"{question_count} questions, each searching only the filing it is about. A hit means "
+            "a top-k chunk spans a page that holds the evidence."
         )
         lines += [
             introduction,
             "",
-            "| Chunking | " + " | ".join(f"recall@{k}" for k in RECALL_CUTOFFS) + " |",
-            "|----------|" + "|".join("---------" for _ in RECALL_CUTOFFS) + "|",
+            "| Chunking | Method | " + " | ".join(f"recall@{k}" for k in RECALL_CUTOFFS) + " |",
+            "|----------|--------|" + "|".join("---------" for _ in RECALL_CUTOFFS) + "|",
         ]
-        for name, recalls in results.items():
+        for (strategy, method), recalls in results.items():
             cells = " | ".join(f"{recalls[k]:.1%}" for k in RECALL_CUTOFFS)
-            lines.append(f"| {name} | {cells} |")
+            lines.append(f"| {strategy} | {method} | {cells} |")
         lines.append("")
 
     lines += ["## Questions that could not be scored", ""]
@@ -164,11 +223,18 @@ def render_results(
     return "\n".join(lines) + "\n"
 
 
-def evaluate_corpus(data_dir: Path, questions_path: Path | None = None) -> str:
+def evaluate_corpus(
+    data_dir: Path,
+    questions_path: Path | None = None,
+    embedder: Embedder | None = None,
+    reranker: Reranker | None = None,
+    make_index: IndexFactory = in_memory_index,
+) -> str:
     """Score every strategy over the parsed corpus and write `RETRIEVAL_RESULTS.md`.
 
     Without `questions_path` the questions are read from `questions.jsonl` in `data_dir`, and a
-    missing file means no questions yet. A path that is given but missing is an error.
+    missing file means no questions yet. A path that is given but missing is an error. See
+    `evaluate_strategies` for the `embedder` and `reranker`.
     """
     manifest = json.loads((data_dir / "manifest.json").read_text(encoding="utf-8"))
     documents = {}
@@ -183,7 +249,9 @@ def evaluate_corpus(data_dir: Path, questions_path: Path | None = None) -> str:
         questions = load_questions(default_path) if default_path.exists() else []
     else:
         questions = load_questions(questions_path)  # raises if the file is missing
-    results, scored, problems = evaluate_strategies(documents, questions)
+    results, scored, problems = evaluate_strategies(
+        documents, questions, embedder, reranker, make_index
+    )
     report = render_results(results, scored, problems)
     (data_dir / "RETRIEVAL_RESULTS.md").write_text(report, encoding="utf-8")
     return report

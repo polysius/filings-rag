@@ -1,7 +1,9 @@
 import json
 
 import pytest
+from fakes import KeywordEmbedder, LengthReranker
 
+from filings_rag.dense import InMemoryDenseIndex
 from filings_rag.parser import Block
 from filings_rag.retrieval_eval import (
     EvidenceNotFound,
@@ -48,8 +50,8 @@ def test_recall_counts_a_hit_when_the_chunk_spans_the_gold_page():
     results, scored, problems = evaluate_strategies({DOC: blocks()}, questions)
 
     assert scored == 1 and problems == []
-    assert results["section"] == {1: 1.0, 5: 1.0, 10: 1.0}
-    assert results["fixed"][10] == 1.0
+    assert results[("section", "bm25")] == {1: 1.0, 5: 1.0, 10: 1.0}
+    assert results[("fixed", "bm25")][10] == 1.0
 
 
 def test_recall_is_a_miss_when_the_answer_page_is_not_retrieved():
@@ -58,7 +60,76 @@ def test_recall_is_a_miss_when_the_answer_page_is_not_retrieved():
 
     results, _, _ = evaluate_strategies({DOC: [*blocks(), *filler]}, questions)
 
-    assert results["section"][1] == 0.0
+    assert results[("section", "bm25")][1] == 0.0
+
+
+def vendor_filing() -> list[Block]:
+    """Page 2 answers the question with different words than the question uses."""
+    filler = [Block("text", n, "Item 7", text=f"supplier supplier notes {n}") for n in range(3, 20)]
+    return [
+        Block("text", 1, "Item 1", text="office lease supplier supplier supplier supplier"),
+        Block("text", 2, "Item 1A", text="we rely on one vendor for all of our parts"),
+        *filler,
+    ]
+
+
+def test_dense_and_hybrid_methods_are_scored_when_an_embedder_is_given():
+    questions = [question("supplier dependence", "one vendor")]
+
+    results, scored, _ = evaluate_strategies({DOC: vendor_filing()}, questions, KeywordEmbedder())
+
+    assert scored == 1
+    methods = {method for _, method in results}
+    assert methods == {"bm25", "dense", "hybrid"}
+    assert {strategy for strategy, _ in results} == {"fixed", "section"}
+    # The vendor page shares no query word with the question, but the embedder links the words.
+    assert results[("section", "dense")][5] == 1.0
+    assert results[("section", "bm25")][1] == 0.0
+
+
+def test_a_reranker_adds_the_reranked_hybrid_method():
+    questions = [question("which supplier do we depend on", "one vendor")]
+    reranker = LengthReranker()
+
+    results, _, _ = evaluate_strategies(
+        {DOC: vendor_filing()}, questions, KeywordEmbedder(), reranker
+    )
+
+    assert ("section", "hybrid+rerank") in results
+    assert reranker.calls
+
+
+def test_only_filings_that_questions_ask_about_are_embedded():
+    other = [Block("text", 1, "Item 1", text="cyber litigation other filing")]
+    documents = {DOC: vendor_filing(), "OTHER_10-K_2024-12-31": other}
+    embedder = KeywordEmbedder()
+
+    evaluate_strategies(documents, [question("supplier", "one vendor")], embedder)
+
+    assert not any("other filing" in text for text in embedder.embedded_texts)
+
+
+def test_a_dense_index_is_built_per_strategy_through_the_given_factory():
+    tables = []
+
+    def make_index(table, chunks, vectors):
+        tables.append(table)
+        return InMemoryDenseIndex(chunks, vectors)
+
+    evaluate_strategies(
+        {DOC: vendor_filing()},
+        [question("supplier", "one vendor")],
+        KeywordEmbedder(),
+        make_index=make_index,
+    )
+
+    assert tables == ["chunks_fixed", "chunks_section"]
+
+
+def test_without_an_embedder_only_bm25_is_scored():
+    results, _, _ = evaluate_strategies({DOC: blocks()}, [question("supply chain", "supplier")])
+
+    assert {method for _, method in results} == {"bm25"}
 
 
 def test_questions_that_cannot_be_scored_are_listed_not_counted():
@@ -84,12 +155,15 @@ def test_render_says_not_measured_without_questions():
 
 
 def test_render_has_a_row_per_strategy():
-    results = {"fixed": {1: 0.5, 5: 0.75, 10: 1.0}, "section": {1: 1.0, 5: 1.0, 10: 1.0}}
+    results = {
+        ("fixed", "bm25"): {1: 0.5, 5: 0.75, 10: 1.0},
+        ("section", "hybrid"): {1: 1.0, 5: 1.0, 10: 1.0},
+    }
 
     report = render_results(results, 4, ["a problem"])
 
-    assert "| fixed | 50.0% | 75.0% | 100.0% |" in report
-    assert "| section | 100.0% | 100.0% | 100.0% |" in report
+    assert "| fixed | bm25 | 50.0% | 75.0% | 100.0% |" in report
+    assert "| section | hybrid | 100.0% | 100.0% | 100.0% |" in report
     assert "- a problem" in report
 
 
@@ -118,7 +192,7 @@ def test_evaluate_corpus_writes_the_report(tmp_path):
 
     evaluate_corpus(tmp_path, tmp_path / "questions.jsonl")
 
-    assert "| section | 100.0% |" in (tmp_path / "RETRIEVAL_RESULTS.md").read_text()
+    assert "| section | bm25 | 100.0% |" in (tmp_path / "RETRIEVAL_RESULTS.md").read_text()
 
 
 def test_evaluate_corpus_without_a_question_file_reports_not_measured(tmp_path):
@@ -191,7 +265,7 @@ def test_default_questions_file_is_read_from_the_data_directory(tmp_path):
 
     evaluate_corpus(tmp_path)
 
-    assert "| section | 100.0% |" in (tmp_path / "RETRIEVAL_RESULTS.md").read_text()
+    assert "| section | bm25 | 100.0% |" in (tmp_path / "RETRIEVAL_RESULTS.md").read_text()
 
 
 def test_load_questions_skips_blank_lines(tmp_path):

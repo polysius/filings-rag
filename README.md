@@ -12,7 +12,8 @@ financial fields, and validates them against XBRL ground truth. Answers cite doc
 | M2 Parsing (headings, text, tables, page numbers, report) | Implemented, not yet run on real filings |
 | M3 Structured extraction (Claude, schema validation, XBRL scoring) | Implemented, not yet run on real filings |
 | M4 Retrieval and QA: chunking, BM25, retrieval evaluation | Implemented, not yet run on real filings |
-| M4 Retrieval and QA: dense search, reranker, cited answers | Planned |
+| M4 Retrieval and QA: dense search, hybrid fusion, reranker, pgvector | Implemented, not yet run on real filings |
+| M4 Retrieval and QA: cited answers and their evaluation | Planned |
 | M5 API | Planned |
 
 ## Pilot corpus
@@ -126,3 +127,45 @@ boilerplate and a search across all filings would mostly measure that. A chunk t
 pages counts as a hit for each of them, so a strategy with larger page spans scores higher for that
 reason alone. Questions whose evidence cannot be found are listed in the report and left out of the
 counts.
+
+### Dense search, hybrid search and reranking
+
+`make eval-retrieval` scores BM25 only. Add `--dense` to also score dense search and hybrid
+search, and `--rerank` to add hybrid search followed by a reranker. The report then has one row
+for each chunking strategy and method.
+
+```
+pip install -e ".[retrieval]"
+filings-rag eval-retrieval --data data --dense --rerank
+```
+
+The models run locally through ONNX Runtime and are downloaded on first use into
+`data/models/`, pinned to a fixed revision, about 220 MB in all. The embedding model is
+`BAAI/bge-small-en-v1.5`. It uses the first token's vector, scaled to length 1, and queries
+(but not chunks) start with the instruction sentence the model was trained with. The reranker is
+the cross-encoder `cross-encoder/ms-marco-MiniLM-L-6-v2`. Inputs are cut at 512 tokens.
+
+Hybrid search takes the top 50 chunks from BM25 and the top 50 from dense search and merges
+them by reciprocal rank fusion, which uses ranks only, so the two kinds of score need no common
+scale. The reranker re-orders the top 30 of the hybrid result. Only the filings that questions
+ask about are embedded, and chunk embeddings are cached in `data/embeddings.sqlite` under a key
+made from the model revision and the text, so a rerun does not embed them again.
+
+Dense vectors are held in memory unless you pass `--store pgvector`. That keeps them in a
+Postgres table with the pgvector extension, one table per chunking strategy, rebuilt on each run.
+Start a local database and point the command at it:
+
+```
+docker compose -f docker/pgvector.yml up -d
+export FILINGS_RAG_PG_URL=postgresql://postgres@127.0.0.1:5433/postgres
+filings-rag eval-retrieval --data data --dense --store pgvector
+```
+
+The compose file publishes the database on 127.0.0.1 only, on port 5433, with no password, so
+use it for local experiments. The driver is `pg8000`, which needs no native Postgres library.
+
+Tests use small stand-ins for the models. `tests/test_onnx_models.py` also has checks against the
+real models, which are skipped until the models are downloaded; set `FILINGS_RAG_MODELS` to the
+folder that holds them. `tests/test_pgvector.py` runs against a real database when
+`FILINGS_RAG_PG_URL` is set. The models are small, so expect weaker results than from a large
+embedding model, and a reranker trained on web search passages may not suit financial tables.
