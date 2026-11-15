@@ -1,0 +1,16 @@
+# A local Postgres with the pgvector extension, for `filings-rag eval-retrieval --store pgvector`.
+#
+#   docker compose -f docker/pgvector.yml up -d
+#   FILINGS_RAG_PG_URL=postgresql://postgres@127.0.0.1:5433/postgres
+#
+# The port is bound to this machine only and there is no password, so this is for local
+# experiments and holds nothing but chunks of public filings. It uses port 5433 because 5432 is
+# often taken by another Postgres.
+name: filings-rag-pgvector
+services:
+  pgvector:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:5433:5432"

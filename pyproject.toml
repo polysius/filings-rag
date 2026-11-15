@@ -14,6 +14,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5"]
+# Dense search and reranking with local ONNX models, and the pgvector store.
+retrieval = ["numpy>=1.26", "onnxruntime>=1.20", "pg8000>=1.31", "tokenizers>=0.20"]
 
 [project.scripts]
 filings-rag = "filings_rag.cli:main"

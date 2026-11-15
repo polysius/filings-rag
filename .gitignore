@@ -9,3 +9,5 @@ data/raw/
 data/xbrl/
 data/parsed/
 data/extracted/
+data/models/
+data/embeddings.sqlite
