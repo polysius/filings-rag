@@ -44,9 +44,14 @@ RERANKER_MODEL = ModelSpec(
 )
 
 
+def model_folder(spec: ModelSpec, models_dir: Path) -> Path:
+    """The folder name includes the revision, so files of another revision are never reused."""
+    return models_dir / f"{spec.name}-{spec.revision[:8]}"
+
+
 def download_model(spec: ModelSpec, models_dir: Path, client: httpx.Client | None = None) -> Path:
     """Download the model files that are not on disk yet and return the model folder."""
-    folder = models_dir / spec.name
+    folder = model_folder(spec, models_dir)
     client = client or httpx.Client(timeout=DOWNLOAD_TIMEOUT_SECONDS, follow_redirects=True)
     for file in spec.files:
         target = folder / file

@@ -9,6 +9,7 @@ from filings_rag.onnx_models import (
     RERANKER_MODEL,
     ModelSpec,
     download_model,
+    model_folder,
 )
 
 SPEC = ModelSpec("tiny", "owner/tiny", "abc123", ("onnx/model.onnx", "tokenizer.json"))
@@ -37,7 +38,7 @@ def test_download_writes_each_file_from_the_pinned_revision(tmp_path):
 
     folder = download_model(SPEC, tmp_path, client)
 
-    assert folder == tmp_path / "tiny"
+    assert folder == tmp_path / "tiny-abc123"
     assert (folder / "onnx" / "model.onnx").read_bytes() == b"weights"
     assert (folder / "tokenizer.json").read_bytes() == b"{}"
     assert (
@@ -61,14 +62,48 @@ def test_a_failed_download_leaves_no_file_behind(tmp_path):
     with pytest.raises(httpx.HTTPStatusError):
         download_model(SPEC, tmp_path, client)
 
-    assert (tmp_path / "tiny" / "onnx" / "model.onnx").exists()
-    assert not (tmp_path / "tiny" / "tokenizer.json").exists()
-    assert not list((tmp_path / "tiny").rglob("*.part"))
+    assert (tmp_path / "tiny-abc123" / "onnx" / "model.onnx").exists()
+    assert not (tmp_path / "tiny-abc123" / "tokenizer.json").exists()
+    assert not list((tmp_path / "tiny-abc123").rglob("*.part"))
+
+
+def test_another_revision_is_downloaded_again_not_reused(tmp_path):
+    files = {"onnx/model.onnx": b"weights", "tokenizer.json": b"{}"}
+    download_model(SPEC, tmp_path, serving(files))
+    requests: list[httpx.Request] = []
+    newer = ModelSpec("tiny", "owner/tiny", "def456", SPEC.files)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=b"new weights")
+
+    folder = download_model(newer, tmp_path, httpx.Client(transport=httpx.MockTransport(handler)))
+
+    assert len(requests) == 2
+    assert folder != model_folder(SPEC, tmp_path)
+    assert (folder / "onnx" / "model.onnx").read_bytes() == b"new weights"
+
+
+def test_an_interrupted_download_leaves_no_finished_file(tmp_path):
+    class Broken(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"half of the file"
+            raise httpx.ReadError("connection lost")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=Broken())
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(httpx.ReadError):
+        download_model(SPEC, tmp_path, client)
+
+    assert not (model_folder(SPEC, tmp_path) / "onnx" / "model.onnx").exists()
 
 
 MODELS_DIR = Path(os.environ.get("FILINGS_RAG_MODELS", "data/models"))
 MODELS_PRESENT = all(
-    (MODELS_DIR / spec.name / file).exists()
+    (model_folder(spec, MODELS_DIR) / file).exists()
     for spec in (EMBEDDING_MODEL, RERANKER_MODEL)
     for file in spec.files
 )
@@ -81,7 +116,7 @@ class TestRealModels:
     def test_a_paraphrase_is_closer_than_an_unrelated_sentence(self):
         from filings_rag.onnx_models import OnnxEmbedder
 
-        embedder = OnnxEmbedder(MODELS_DIR / EMBEDDING_MODEL.name)
+        embedder = OnnxEmbedder(model_folder(EMBEDDING_MODEL, MODELS_DIR))
         passage, paraphrase, unrelated = embedder.embed_documents(
             [
                 "We depend on a single vendor for the chips used in our products.",
@@ -99,7 +134,7 @@ class TestRealModels:
     def test_a_query_finds_the_passage_that_answers_it(self):
         from filings_rag.onnx_models import OnnxEmbedder
 
-        embedder = OnnxEmbedder(MODELS_DIR / EMBEDDING_MODEL.name)
+        embedder = OnnxEmbedder(model_folder(EMBEDDING_MODEL, MODELS_DIR))
         query = embedder.embed_query("Which supplier does the company depend on?")
         answer, other = embedder.embed_documents(
             [
@@ -113,7 +148,7 @@ class TestRealModels:
     def test_the_reranker_puts_the_relevant_passage_first(self):
         from filings_rag.onnx_models import OnnxReranker
 
-        reranker = OnnxReranker(MODELS_DIR / RERANKER_MODEL.name)
+        reranker = OnnxReranker(model_folder(RERANKER_MODEL, MODELS_DIR))
         scores = reranker.score(
             "What are the company's main risk factors?",
             [
@@ -128,7 +163,7 @@ class TestRealModels:
     def test_long_text_is_cut_to_the_token_limit_instead_of_failing(self):
         from filings_rag.onnx_models import OnnxEmbedder
 
-        embedder = OnnxEmbedder(MODELS_DIR / EMBEDDING_MODEL.name)
+        embedder = OnnxEmbedder(model_folder(EMBEDDING_MODEL, MODELS_DIR))
 
         vector = embedder.embed_documents(["supplier " * 5000])[0]
 

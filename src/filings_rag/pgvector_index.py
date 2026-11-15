@@ -56,22 +56,32 @@ class PgVectorIndex:
         query = (
             "SELECT chunk_id, document, section, first_page, last_page, text, "
             f"1 - (embedding <=> %s::vector) FROM {self._table} {where} "
-            "ORDER BY embedding <=> %s::vector LIMIT %s"
+            "ORDER BY embedding <=> %s::vector, chunk_id LIMIT %s"  # chunk_id settles ties
         )
         literal = vector_literal(vector)
         arguments = [literal, *([document] if document is not None else []), literal, k]
         cursor = self._connection.cursor()
-        cursor.execute(query, arguments)
-        rows = cursor.fetchall()
-        # The driver opens a transaction on every query. End it, because an open transaction
-        # keeps a lock on the table and would block the next build that drops it.
-        self._connection.rollback()
+        try:
+            cursor.execute(query, arguments)
+            rows = cursor.fetchall()
+        finally:
+            # The driver opens a transaction on every query. End it even after an error, because
+            # an open transaction keeps a lock on the table and blocks the next build that drops
+            # it, and a failed one rejects every later statement.
+            self._connection.rollback()
         return [
             Hit(Chunk(chunk_id, doc, section, first_page, last_page, text), float(score))
             for chunk_id, doc, section, first_page, last_page, text, score in rows
         ]
 
     def _replace_rows(self, chunks: list[Chunk], vectors: Sequence[Sequence[float]]) -> None:
+        try:
+            self._write_rows(chunks, vectors)
+        except Exception:
+            self._connection.rollback()  # leave the connection usable for the caller
+            raise
+
+    def _write_rows(self, chunks: list[Chunk], vectors: Sequence[Sequence[float]]) -> None:
         cursor = self._connection.cursor()
         cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
         cursor.execute(f"DROP TABLE IF EXISTS {self._table}")

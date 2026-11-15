@@ -13,6 +13,7 @@ from filings_rag.pgvector_index import PgVectorIndex, connect
 from filings_rag.retrieval_eval import QuestionFileError, evaluate_corpus
 
 PG_URL_VARIABLE = "FILINGS_RAG_PG_URL"
+MISSING_EXTRA_MESSAGE = 'error: dense search needs `pip install -e ".[retrieval]"`'
 
 
 def main() -> None:
@@ -85,7 +86,12 @@ def retrieval_options(args: argparse.Namespace, parser: argparse.ArgumentParser)
     if not args.dense:
         return {}
 
+    # Check the cheap things first, so a mistake does not cost a model download.
+    if not (args.data / "manifest.json").exists():
+        raise SystemExit(f"error: no manifest.json in {args.data}; run `make corpus` first")
     options: dict = {}
+    if args.store == "pgvector":
+        options["make_index"] = _pgvector_index_factory(parser)
     try:
         embedder = load_embedder(args.models_dir)
         options["embedder"] = CachedEmbedder(
@@ -94,17 +100,26 @@ def retrieval_options(args: argparse.Namespace, parser: argparse.ArgumentParser)
         if args.rerank:
             options["reranker"] = load_reranker(args.models_dir)
     except ImportError as error:
-        raise SystemExit('error: dense search needs `pip install -e ".[retrieval]"`') from error
-
-    if args.store == "pgvector":
-        url = os.environ.get(PG_URL_VARIABLE)
-        if not url:
-            parser.error(f"--store pgvector needs the database URL in {PG_URL_VARIABLE}")
-        connection = connect(url)
-        options["make_index"] = lambda table, chunks, vectors: PgVectorIndex.build(
-            connection, table, chunks, vectors
-        )
+        raise SystemExit(MISSING_EXTRA_MESSAGE) from error
     return options
+
+
+def _pgvector_index_factory(parser: argparse.ArgumentParser):
+    url = os.environ.get(PG_URL_VARIABLE)
+    if not url:
+        parser.error(f"--store pgvector needs the database URL in {PG_URL_VARIABLE}")
+    try:
+        connection = connect(url)
+    except ImportError as error:
+        raise SystemExit(MISSING_EXTRA_MESSAGE) from error
+    except Exception as error:
+        message = f"error: cannot connect to the database in {PG_URL_VARIABLE}: {error}"
+        raise SystemExit(message) from error
+
+    def make_index(table, chunks, vectors):
+        return PgVectorIndex.build(connection, table, chunks, vectors)
+
+    return make_index
 
 
 if __name__ == "__main__":
