@@ -11,7 +11,8 @@ financial fields, and validates them against XBRL ground truth. Answers cite doc
 | M1 Corpus (EDGAR download, XBRL facts, manifest) | Implemented |
 | M2 Parsing (headings, text, tables, page numbers, report) | Implemented, not yet run on real filings |
 | M3 Structured extraction (Claude, schema validation, XBRL scoring) | Implemented, not yet run on real filings |
-| M4 Retrieval and QA | Planned |
+| M4 Retrieval and QA: chunking, BM25, retrieval evaluation | Implemented, not yet run on real filings |
+| M4 Retrieval and QA: dense search, reranker, cited answers | Planned |
 | M5 API | Planned |
 
 ## Pilot corpus
@@ -90,3 +91,34 @@ Known limits:
   filing that recasts the same period is not used.
 - Filings whose extraction failed are listed under failures and are not counted in the accuracy.
 - Banks tag revenue in several ways, so a bank can show as missing when no tried concept exists.
+
+## Retrieval
+
+`src/filings_rag/chunking.py` offers two strategies with the same size target of 1,500
+characters. `fixed` fills each chunk from the blocks in document order and ignores structure.
+`section` never crosses an Item or Part boundary and keeps each table in chunks of its own. Every
+chunk records the pages it spans, so an answer built from it can cite a page. `bm25.py` ranks
+chunks by keyword match.
+
+`make eval-retrieval` compares the strategies on a question set you label by hand and writes
+`data/RETRIEVAL_RESULTS.md`. Put one JSON object per line in `data/questions.jsonl`, or pass
+another file with `--questions`:
+
+```
+{"question": "What does the company say about supplier concentration?", "document": "AAPL_10-K_2024-09-28", "answer": "...", "evidence": "..."}
+```
+
+Every line needs all four fields with text in them. A line that is not valid reports its line
+number and stops the run. `document` is the file name in `data/raw/` without its extension.
+`evidence` is a sentence or table row copied from the filing. It must sit inside one paragraph or
+one table of the parsed text, so text that runs across a page break is not found. Case and
+punctuation are ignored when matching. Gold pages are the pages of the parsed blocks that contain
+the evidence, so labels follow the parser's physical page numbers and survive a re-parse. They are
+not the page numbers printed in the filing.
+
+Recall@k counts a question as found when one of the top k chunks of that filing spans a gold page.
+Search is limited to the filing each question is about, because the filers share near identical
+boilerplate and a search across all filings would mostly measure that. A chunk that spans several
+pages counts as a hit for each of them, so a strategy with larger page spans scores higher for that
+reason alone. Questions whose evidence cannot be found are listed in the report and left out of the
+counts.

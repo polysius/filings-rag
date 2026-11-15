@@ -6,6 +6,7 @@ from filings_rag.edgar import EdgarClient, user_agent_from_env
 from filings_rag.extract_corpus import extract_corpus
 from filings_rag.extractor import completer_from_env
 from filings_rag.parse_corpus import parse_corpus
+from filings_rag.retrieval_eval import QuestionFileError, evaluate_corpus
 
 
 def main() -> None:
@@ -21,6 +22,12 @@ def main() -> None:
 
     extract = commands.add_parser("extract", help="Extract fields with Claude and score vs XBRL")
     extract.add_argument("--data", type=Path, default=Path("data"))
+
+    retrieval = commands.add_parser("eval-retrieval", help="Compare chunking strategies")
+    retrieval.add_argument("--data", type=Path, default=Path("data"))
+    retrieval.add_argument(
+        "--questions", type=Path, help="question file, default is questions.jsonl in --data"
+    )
 
     args = parser.parse_args()
     if args.command == "build-corpus":
@@ -41,6 +48,12 @@ def main() -> None:
         )
         if run.failures:
             raise SystemExit(1)
+    elif args.command == "eval-retrieval":
+        try:
+            evaluate_corpus(args.data, args.questions)
+        except (OSError, QuestionFileError) as error:
+            raise SystemExit(f"error: {error}") from error
+        print(f"Wrote {args.data / 'RETRIEVAL_RESULTS.md'}")
 
 
 if __name__ == "__main__":
