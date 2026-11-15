@@ -65,10 +65,14 @@ Known limits:
 
 ## Extraction
 
-`make extract` needs Claude API credentials (`ANTHROPIC_API_KEY`, or a profile from
-`ant auth login`) and calls `claude-opus-5-5`, with the server-side refusal fallback turned on.
-Set `MODEL` in `src/filings_rag/extractor.py` to use a cheaper model. For each parsed filing it sends the tables that mention
-revenue, net income, total assets or segments, plus the start of Item 1A, to Claude. Every excerpt
+`make extract` uses the local Claude Code bridge, so it needs no API key. Start the bridge in
+another terminal with `make bridge`, or `python scripts/claude_cli_bridge.py` where `make` is not
+installed. It runs the `claude` CLI that is signed in on this machine, so calls count against that
+Claude Code plan, and it listens on 127.0.0.1 only. Extraction asks it for the `opus` model alias.
+Set `LLM_MODEL` (for example `sonnet`) to change that, or `LLM_BASE_URL`, which must end in `/v1`,
+to reach a bridge on another address. If the bridge is not running, the run lists every filing as
+failed with a message that says so. For each parsed filing it sends the tables
+that mention revenue, net income, total assets or segments, plus the start of Item 1A, to Claude. Every excerpt
 is tagged `[page N]`. The reply must be JSON that passes the `FilingExtraction` schema in
 `src/filings_rag/schema.py`: revenue, net income, total assets, segments and up to five risk
 factor titles, with a page for each amount. An invalid reply is sent back with the validation

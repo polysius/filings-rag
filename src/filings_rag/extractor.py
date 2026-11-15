@@ -1,15 +1,20 @@
 """Extract structured fields from filing text with an LLM, validating and retrying."""
 
 import json
+import os
 from typing import Protocol
 
+import httpx
 from pydantic import ValidationError
 
 from filings_rag.schema import FilingExtraction
 
-MODEL = "claude-opus-5-5"
-# Thinking tokens count against the limit, so leave room for them and for the JSON answer.
-MAX_TOKENS = 16_000
+BRIDGE_URL = "http://127.0.0.1:8787/v1"  # where scripts/claude_cli_bridge.py listens
+MODEL = "opus"  # a model alias the bridge passes to `claude --model`
+# The bridge stops a call after 180 seconds, so wait a little longer than that.
+REQUEST_TIMEOUT_SECONDS = 200
+START_COMMAND = "python scripts/claude_cli_bridge.py"
+MAX_ERROR_CHARACTERS = 300
 MAX_ATTEMPTS = 3
 
 SYSTEM_PROMPT = """You extract key fields from SEC 10-K and 10-Q filings.
@@ -31,34 +36,82 @@ class Completer(Protocol):
 
 
 class CompletionError(Exception):
-    """The model stopped without a complete answer, so retrying with feedback would not help."""
+    """The bridge could not return an answer, so retrying with feedback would not help."""
 
 
-class AnthropicCompleter:
-    def __init__(self, model: str = MODEL):
-        import anthropic  # imported here so the rest of the package works without the SDK
+class BridgeCompleter:
+    """Asks the local Claude Code bridge, which runs the signed in `claude` CLI.
 
-        # The client finds credentials itself: an API key, an auth token or a logged-in profile.
-        self._client = anthropic.Anthropic()
-        self._model = model
+    The bridge speaks the OpenAI chat format. No API key is needed, and the calls count against
+    the Claude Code plan that is signed in on this machine.
+    """
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        model: str | None = None,
+        client: httpx.Client | None = None,
+    ):
+        # An environment variable that is set but empty counts as not set.
+        base_url = base_url or os.environ.get("LLM_BASE_URL") or BRIDGE_URL
+        self._url = base_url.rstrip("/") + "/chat/completions"
+        self._model = model or os.environ.get("LLM_MODEL") or MODEL
+        self._client = client or httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS)
 
     def complete(self, system: str, user: str) -> str:
-        response = self._client.beta.messages.create(
-            model=self._model,
-            max_tokens=MAX_TOKENS,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            # If a safety classifier declines the request, the API reruns it on a fallback model.
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-        )
-        if response.stop_reason not in ("end_turn", "stop_sequence"):
-            raise CompletionError(f"Model stopped early: {response.stop_reason}")
-        return "".join(block.text for block in response.content if block.type == "text")
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        try:
+            response = self._client.post(self._url, json=payload)
+        except httpx.ConnectError as error:
+            raise CompletionError(
+                f"Cannot reach the bridge at {self._url}. "
+                f"Start it with `{START_COMMAND}` (or `make bridge`)."
+            ) from error
+        except httpx.TimeoutException as error:
+            raise CompletionError(
+                f"The bridge at {self._url} did not answer within {REQUEST_TIMEOUT_SECONDS} seconds"
+            ) from error
+        except httpx.HTTPError as error:
+            raise CompletionError(
+                f"The request to {self._url} failed: {type(error).__name__}: {error}"
+            ) from error
+
+        if response.is_error:
+            raise CompletionError(
+                f"The bridge returned {response.status_code}: {_error_message(response)}"
+            )
+        return _reply_text(response)
 
 
-def completer_from_env() -> AnthropicCompleter:
-    return AnthropicCompleter()
+def _error_message(response: httpx.Response) -> str:
+    """The bridge's own error message when it sent one, cut short, else the start of the body."""
+    try:
+        text = str(response.json()["error"]["message"])
+    except (ValueError, KeyError, TypeError):
+        text = response.text
+    return text[:MAX_ERROR_CHARACTERS]
+
+
+def _reply_text(response: httpx.Response) -> str:
+    try:
+        text = response.json()["choices"][0]["message"]["content"]
+    except (ValueError, KeyError, IndexError, TypeError) as error:
+        raise CompletionError(
+            f"Expected an OpenAI style chat reply but got: {response.text[:MAX_ERROR_CHARACTERS]}"
+        ) from error
+    if not isinstance(text, str):
+        raise CompletionError("The bridge reply has no text")
+    return text
+
+
+def completer_from_env() -> BridgeCompleter:
+    return BridgeCompleter()
 
 
 class ExtractionError(Exception):

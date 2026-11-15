@@ -1,11 +1,11 @@
-import inspect
-from types import SimpleNamespace
+import json
 
+import httpx
 import pytest
 
 from filings_rag.context import MAX_RISK_CHARACTERS, MAX_TABLES, build_context
 from filings_rag.extractor import (
-    AnthropicCompleter,
+    BridgeCompleter,
     CompletionError,
     ExtractionError,
     extract_filing,
@@ -121,52 +121,6 @@ def test_description_is_part_of_the_prompt():
     assert "Acme 10-Q ending 2024-09-30" in completer.user_prompts[0]
 
 
-class FakeResponse:
-    def __init__(self, stop_reason: str, text: str = "{}"):
-        self.stop_reason = stop_reason
-        self.content = [SimpleNamespace(type="thinking"), SimpleNamespace(type="text", text=text)]
-
-
-def completer_with_response(monkeypatch, response):
-    """An AnthropicCompleter whose SDK client returns `response` and records the call."""
-    import anthropic
-
-    calls = []
-
-    def create(**kwargs):
-        calls.append(kwargs)
-        return response
-
-    client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(create=create)))
-    monkeypatch.setattr(anthropic, "Anthropic", lambda: client)
-    return AnthropicCompleter(), calls
-
-
-def test_anthropic_completer_returns_only_the_text_blocks(monkeypatch):
-    completer, calls = completer_with_response(monkeypatch, FakeResponse("end_turn", "{}"))
-
-    assert completer.complete("system", "user") == "{}"
-    assert calls[0]["model"] == "claude-opus-5-5"
-
-
-def test_anthropic_completer_call_matches_the_sdk_signature(monkeypatch):
-    from anthropic.resources.beta.messages import Messages
-
-    completer, calls = completer_with_response(monkeypatch, FakeResponse("end_turn"))
-
-    completer.complete("system", "user")
-
-    inspect.signature(Messages.create).bind(None, **calls[0])  # raises TypeError on a bad keyword
-
-
-@pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens", "model_context_window_exceeded"])
-def test_anthropic_completer_rejects_an_incomplete_answer(monkeypatch, stop_reason):
-    completer, _ = completer_with_response(monkeypatch, FakeResponse(stop_reason))
-
-    with pytest.raises(CompletionError):
-        completer.complete("system", "user")
-
-
 def test_statements_are_kept_when_earlier_tables_fill_the_limit():
     md_and_a_tables = [
         Block("table", 10, "Item 7", rows=[[f"Segment {n} revenue", "5"]]) for n in range(30)
@@ -180,3 +134,136 @@ def test_statements_are_kept_when_earlier_tables_fill_the_limit():
     assert "Total assets | 500" in context
     assert context.count("(table)") == MAX_TABLES
     assert context.index("Segment 0 revenue") < context.index("Total net sales")  # document order
+
+
+def bridge_with(handler, **options) -> BridgeCompleter:
+    """A BridgeCompleter whose HTTP calls go to `handler` instead of the network."""
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    return BridgeCompleter(client=client, **options)
+
+
+def chat_reply(text: str) -> httpx.Response:
+    message = {"role": "assistant", "content": text}
+    return httpx.Response(200, json={"choices": [{"message": message}]})
+
+
+class RecordingHandler:
+    """An HTTP handler that records each request and answers with an empty JSON reply."""
+
+    def __init__(self):
+        self.requests: list[httpx.Request] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return chat_reply("{}")
+
+
+def test_bridge_completer_returns_the_reply_text():
+    completer = bridge_with(lambda request: chat_reply("{}"))
+
+    assert completer.complete("system", "user") == "{}"
+
+
+def test_bridge_completer_sends_the_prompts_in_the_openai_chat_format():
+    handler = RecordingHandler()
+
+    bridge_with(handler, base_url="http://bridge.test/v1/", model="sonnet").complete("sys", "usr")
+
+    request = handler.requests[0]
+    assert str(request.url) == "http://bridge.test/v1/chat/completions"
+    assert json.loads(request.content) == {
+        "model": "sonnet",
+        "messages": [{"role": "system", "content": "sys"}, {"role": "user", "content": "usr"}],
+    }
+
+
+def test_bridge_completer_reads_the_address_and_model_from_the_environment(monkeypatch):
+    monkeypatch.setenv("LLM_BASE_URL", "http://elsewhere.test/v1")
+    monkeypatch.setenv("LLM_MODEL", "haiku")
+    handler = RecordingHandler()
+
+    bridge_with(handler).complete("sys", "usr")
+
+    request = handler.requests[0]
+    assert str(request.url) == "http://elsewhere.test/v1/chat/completions"
+    assert json.loads(request.content)["model"] == "haiku"
+
+
+def test_bridge_completer_uses_the_default_address_and_model(monkeypatch):
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    handler = RecordingHandler()
+
+    bridge_with(handler).complete("sys", "usr")
+
+    request = handler.requests[0]
+    assert str(request.url) == "http://127.0.0.1:8787/v1/chat/completions"
+    assert json.loads(request.content)["model"] == "opus"
+
+
+def test_a_bridge_error_is_reported_with_its_message():
+    error = {"error": {"message": "claude exited 1: usage limit", "type": "bridge_error"}}
+    completer = bridge_with(lambda request: httpx.Response(500, json=error))
+
+    with pytest.raises(CompletionError, match="500.*usage limit"):
+        completer.complete("system", "user")
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        httpx.Response(200, text="hello"),
+        httpx.Response(200, json={"object": "list"}),
+        httpx.Response(200, json={"choices": []}),
+        httpx.Response(200, json=[1, 2]),
+        httpx.Response(200, json={"choices": [{"message": {"content": None}}]}),
+        httpx.Response(302),
+    ],
+)
+def test_an_unexpected_reply_is_a_completion_error(reply):
+    with pytest.raises(CompletionError):
+        bridge_with(lambda request: reply).complete("system", "user")
+
+
+def test_an_empty_environment_variable_counts_as_not_set(monkeypatch):
+    monkeypatch.setenv("LLM_BASE_URL", "")
+    monkeypatch.setenv("LLM_MODEL", "")
+    handler = RecordingHandler()
+
+    bridge_with(handler).complete("sys", "usr")
+
+    request = handler.requests[0]
+    assert str(request.url) == "http://127.0.0.1:8787/v1/chat/completions"
+    assert json.loads(request.content)["model"] == "opus"
+
+
+def test_a_long_error_body_is_cut_short():
+    completer = bridge_with(lambda request: httpx.Response(503, text="x" * 100_000))
+
+    with pytest.raises(CompletionError) as raised:
+        completer.complete("system", "user")
+
+    assert len(str(raised.value)) < 400
+
+
+def test_a_timeout_is_not_reported_as_a_missing_bridge():
+    def handler(request):
+        raise httpx.ReadTimeout("slow")
+
+    with pytest.raises(CompletionError, match="did not answer"):
+        bridge_with(handler).complete("system", "user")
+
+
+def test_a_bad_address_reports_the_real_problem():
+    completer = BridgeCompleter(base_url="no-scheme-address")
+
+    with pytest.raises(CompletionError, match="UnsupportedProtocol"):
+        completer.complete("system", "user")
+
+
+def test_a_bridge_that_is_not_running_says_how_to_start_it():
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    with pytest.raises(CompletionError, match="make bridge"):
+        bridge_with(handler).complete("system", "user")
